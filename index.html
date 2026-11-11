@@ -164,8 +164,8 @@ const R='23456789TJQKA', SUITS='shdc', SYM={s:'♠',h:'♥',d:'♦',c:'♣'};
 const r2=x=>Math.round(x*100)/100;
 const uid36=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const CUR={USD:'$',EUR:'€',GBP:'£',CAD:'$',AUD:'$'};
-function money(x,code){const v=r2(x);return (CUR[code]||'$')+(Number.isInteger(v)?v:v.toFixed(2));}
+const CUR={GBP:'£',USD:'$',EUR:'€',CAD:'$',AUD:'$'};
+function money(x,code){const v=r2(x);return (CUR[code]||'£')+(Number.isInteger(v)?v:v.toFixed(2));}
 function bbs(x,bb){const v=Math.round(x/bb*10)/10;return (Number.isInteger(v)?v:v.toFixed(1));}
 function signed(v,s){return (v>0?'+':v<0?'−':'')+s;}
 function cardHTML(c,sm){return `<span class="card ${sm?'sm':''} c${c[1]}">${c[0]==='T'?'10':c[0]}${SYM[c[1]]}</span>`;}
@@ -289,6 +289,13 @@ function describe(s){
 }
 
 /* ---------------- settle pots ---------------- */
+// Split a pot in whole pence. Leftover pence (odd chips) go one each to the winners
+// closest to the left of the button, as in a live game.
+function splitPot(amt,winners,order){
+  const w=[...winners].sort((a,b)=>order.indexOf(a)-order.indexOf(b));
+  const pence=Math.round(amt*100),each=Math.floor(pence/w.length);let left=pence-each*w.length;
+  return w.map(p=>{const x=each+(left>0?1:0);if(left>0)left--;return [p,x/100];});
+}
 function resolve(h){
   const st=replay(h),P=st.P;let live=st.pre.filter(p=>!P[p].folded);
   // Hero folded with several villains left: the hand is unknown to us, so award it to the last aggressor
@@ -321,9 +328,8 @@ function resolve(h){
     if(pot.el.length===1)w=pot.el;
     else if(pot.el.every(p=>val[p])){let top=null;for(const p of pot.el){if(!top||cmpS(val[p],val[top[0]])>0)top=[p];else if(cmpS(val[p],val[top[0]])===0)top.push(p);}w=top;}
     else{w=pot.el.filter(p=>(h.winners||[]).includes(p));if(!w.length)w=pot.el;}
-    pot.w=w;
-    const share=Math.floor(pot.amt/w.length*100)/100;let rem=r2(pot.amt-share*w.length);
-    w.forEach((p,i)=>{const a=r2(share+(i===0?rem:0));col[p]=r2((col[p]||0)+a);});
+    pot.split=splitPot(pot.amt,w,st.post);pot.w=pot.split.map(x=>x[0]);
+    for(const [p,a] of pot.split)col[p]=r2((col[p]||0)+a);
   }
   const hero=h.pos;
   const net=r2((col[hero]||0)+(refund&&refund.p===hero?refund.amt:0)-P[hero].tot);
@@ -344,7 +350,7 @@ function etStamp(ms){
   }catch(e){const d=new Date(ms);const z=n=>String(n).padStart(2,'0');return `${d.getFullYear()}/${z(d.getMonth()+1)}/${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())} ET`;}
 }
 function handText(h,sess){
-  const res=resolve(h),{st,refund,pots,col,val}=res,P=st.P,code=sess.cur||'USD',m=x=>money(x,code);
+  const res=resolve(h),{st,refund,pots,col,val}=res,P=st.P,code=sess.cur||'GBP',m=x=>money(x,code);
   const name=p=>p===h.pos?(sess.heroName||'Hero'):p;
   const {seats}=positions(h.players);
   const seatNo=p=>seats.indexOf(p)+1;
@@ -383,8 +389,7 @@ function handText(h,sess){
   }
   pots.forEach((pot,i)=>{
     const lbl=pots.length===1?'pot':i===0?'main pot':`side pot-${i}`;
-    const share=Math.floor(pot.amt/pot.w.length*100)/100,rem=r2(pot.amt-share*pot.w.length);
-    pot.w.forEach((p,j)=>L.push(`${name(p)} collected ${m(r2(share+(j===0?rem:0)))} from ${lbl}`));
+    pot.split.forEach(([p,a])=>L.push(`${name(p)} collected ${m(a)} from ${lbl}`));
   });
   if(!sd&&live.length===1)L.push(`${name(live[0])}: doesn't show hand`);
   L.push('*** SUMMARY ***');
@@ -545,7 +550,7 @@ function vStackPad(h,st,m){
   const committed=st.P[p].tot,low=v>0&&v<committed;
   return `<div class="panel pad">
     <div class="grp"><div class="prompt" style="flex:1">${isHero?'<em>Your</em> starting stack':`<em>${p}</em>’s starting stack`}</div><button class="ib" data-a="stackCancel">Cancel</button></div>
-    <div class="amt num"><span class="big">${CUR[S().cur]||'$'}${ui.amt||'0'}</span><span class="bb">${bbs(v,h.bb)} bb</span></div>
+    <div class="amt num"><span class="big">${CUR[S().cur]||'£'}${ui.amt||'0'}</span><span class="bb">${bbs(v,h.bb)} bb</span></div>
     <div class="muted num" style="font-size:13px">Now ${m(cur)} · ${bbs(cur,h.bb)} bb${isHero?'':` · table default ${m(h.vStack)}`}. Enter the stack they had when the hand started.</div>
     ${low?`<div class="warnmsg">${isHero?'You have':p+' has'} already put ${m(committed)} in this hand, so the stack will be raised to at least that.</div>`:''}
     <div class="keys">${['1','2','3','4','5','6','7','8','9','.','0','⌫'].map(k=>`<button class="key" data-a="key" data-k="${k}">${k}</button>`).join('')}</div>
@@ -561,7 +566,7 @@ function vAction(h,st,m){
     const bad=v>0&&(a==='r'?v<=st.curBet:false);
     return `<div class="panel pad">
       <div class="grp"><div class="prompt" style="flex:1">${who} ${a==='b'?'bets':'raises to'}</div><button class="ib" data-a="padCancel">Cancel</button></div>
-      <div class="amt num"><span class="big">${CUR[S().cur]||'$'}${ui.amt||'0'}</span><span class="bb">${bbs(v,bb)} bb</span></div>
+      <div class="amt num"><span class="big">${CUR[S().cur]||'£'}${ui.amt||'0'}</span><span class="bb">${bbs(v,bb)} bb</span></div>
       <div class="muted num" style="font-size:13px">${a==='r'?`Total amount, not the raise size. Current bet ${m(st.curBet)} · min raise to ${m(min)}`:`Min bet ${m(min)}`} · stack ${m(max)}</div>
       ${bad?`<div class="warnmsg">A raise must be more than the current bet of ${m(st.curBet)}.</div>`:''}
       <div class="keys">${['1','2','3','4','5','6','7','8','9','.','0','⌫'].map(k=>`<button class="key" data-a="key" data-k="${k}">${k}</button>`).join('')}</div>
@@ -652,7 +657,7 @@ function decodeHand(str){
     straddle:Array.isArray(o.sd)?validStraddle({pos:o.sd[0],amt:r2(+o.sd[1])},n):null,stacks:cleanStacks(o.k,pre)};
   if(!(h.sb>0&&h.bb>0&&h.heroStack>0&&h.vStack>0))throw new Error('stakes');
   replay(h);
-  return {h,cur:CUR[o.c]?o.c:'USD'};
+  return {h,cur:CUR[o.c]?o.c:'GBP'};
 }
 function readable(h,cur,unit){
   const r=resolve(h),st=r.st,bb=h.bb;
@@ -933,6 +938,9 @@ document.addEventListener('keydown',e=>{
 /* ---------------- boot ---------------- */
 try{ui.unit=localStorage.getItem('hand-log.unit')||'bb';}catch(e){ui.unit='bb';}
 loadLocal();
+// Recalculate stored results so hands saved by older versions (e.g. the uneven-chop bug) show correct numbers.
+(function fixResults(){let changed=false;for(const h of Object.values(DATA.hands)){try{if(h.deleted)continue;const r=resolve(h);if(r.net!==h.net){h.net=r.net;changed=true;}}catch(e){}}
+  if(changed)saveLocal();})();
 const draft=loadDraft();
 if(draft&&DATA.sessions[draft.sid]&&!DATA.sessions[draft.sid].deleted){ui.hand=draft;ui.sid=draft.sid;ui.view='hand';}
 openFromHash();
@@ -949,7 +957,7 @@ document.addEventListener('change',async e=>{
     const okId=x=>typeof x==='string'&&/^[a-z0-9]{1,40}$/i.test(x);
     const sess={},hands={};
     for(const v of Object.values(d.sessions||{})){if(!v||!okId(v.id))continue;
-      sess[v.id]={id:v.id,name:String(v.name||'Live game').slice(0,80),sb:num(v.sb,1),bb:num(v.bb,2),cur:CUR[v.cur]?v.cur:'USD',
+      sess[v.id]={id:v.id,name:String(v.name||'Live game').slice(0,80),sb:num(v.sb,1),bb:num(v.bb,2),cur:CUR[v.cur]?v.cur:'GBP',
         players:Math.min(10,Math.max(2,Math.round(+v.players)||9)),heroStack:num(v.heroStack,200),stack:num(v.stack,200),
         heroName:String(v.heroName||'Hero').replace(/[:\[\]<>]/g,'').slice(0,30)||'Hero',createdAt:num(v.createdAt,Date.now()),
         updatedAt:num(v.updatedAt,0),deleted:!!v.deleted,shared:!!v.shared,
