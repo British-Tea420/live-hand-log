@@ -187,7 +187,8 @@ const STR={
   utg:   {label:'UTG straddle',k:1},
   double:{label:'Double straddle',k:2},
   triple:{label:'Triple straddle',k:3},
-  btn:   {label:'Button straddle',btn:true}
+  btn:   {label:'Button straddle',btn:true},
+  btnula:{label:'Button straddle (ULA)',btn:true,ula:true}
 };
 // Older saves used {pos:'UTG'|'BTN', amt}.
 function normSd(sd){
@@ -204,8 +205,9 @@ function strDefaults(type,bb){const t=STR[type];return t.btn?[r2(bb*2)]:[2,4,8].
 function straddleInfo(sd,n){
   sd=normSd(sd);if(!sd||!strAllowed(sd.type,n))return null;
   const t=STR[sd.type],{pre,post}=positions(n);
-  // Button straddle: the SB acts first and action goes round the table, so the button is last.
-  if(t.btn)return {type:sd.type,label:t.label,posts:[['BTN',sd.amts[0]]],order:post};
+  // Button straddle: the SB acts first and action goes round the table.
+  // ULA (ultimate last action): the button is skipped until everyone else has finished, see nextActor.
+  if(t.btn)return {type:sd.type,label:t.label,posts:[['BTN',sd.amts[0]]],order:post,ula:!!t.ula};
   if(sd.amts.length<t.k)return null;
   // UTG / double / triple: action starts left of the last straddler; the last straddler acts last.
   const who=pre.slice(0,t.k);
@@ -225,6 +227,7 @@ function replay(h){
   st.blinds=[[sbp,P[sbp].in],['BB',P.BB.in]];
   const sd=straddleInfo(h.straddle,h.players);st.straddles=[];
   if(sd)for(const [sp,amt] of sd.posts){const a=put(sp,amt);st.straddles.push([sp,a]);}
+  st.ula=!!(sd&&sd.ula);st.ulaUsed=false;
   st.curBet=Math.max(...pre.map(p=>P[p].in));
   if(sd&&st.curBet>h.bb)st.minRaise=st.curBet;
   st.posted=r2(pre.reduce((a,p)=>a+P[p].in,0));
@@ -244,6 +247,7 @@ function replay(h){
       if(x.in>prev){if(x.in-prev>=st.minRaise)st.minRaise=r2(x.in-prev);st.curBet=x.in;st.lastAgg=ev.p;for(const p of pre)if(p!==ev.p)P[p].acted=false;}
       else if(x.in<prev){L.a='c';}
     }
+    if(st.street===0&&ev.p==='BTN')st.ulaUsed=true;
     x.acted=true;st.log.push(L);
   }
   const live=pre.filter(p=>!P[p].folded);
@@ -261,7 +265,11 @@ function nextActor(st){
   if(!can.length) return null;
   if(can.length===1&&P[can[0]].in>=st.curBet) return null;
   const n=order.length;
-  for(let i=1;i<=n;i++){const p=order[(st.lastIdx+i+n)%n],x=P[p];if(x.folded||x.allin)continue;if(!x.acted||x.in<st.curBet)return p;}
+  // Button straddle with ULA: until the button has acted, skip it; it acts once everyone else is done.
+  // Once it acts (e.g. raises), normal clockwise order applies.
+  const ula=st.street===0&&st.ula&&!st.ulaUsed;
+  for(let i=1;i<=n;i++){const p=order[(st.lastIdx+i+n)%n],x=P[p];if(ula&&p==='BTN')continue;if(x.folded||x.allin)continue;if(!x.acted||x.in<st.curBet)return p;}
+  if(ula){const x=P.BTN;if(x&&!x.folded&&!x.allin&&(!x.acted||x.in<st.curBet))return 'BTN';}
   return null;
 }
 function options(st,p){
@@ -553,7 +561,7 @@ function vHand(){
         <option value="">None</option>${types.map(t=>`<option value="${t}" ${info&&info.type===t?'selected':''}>${STR[t].label}</option>`).join('')}</select></div>
       ${info?`${info.posts.map(([sp,a],i)=>`<div class="row"><div class="field"><label class="lbl" for="strAmt${i}">${sp} posts</label><input id="strAmt${i}" data-i="${i}" class="stramt" inputmode="decimal" value="${a}" autocomplete="off"></div>
         <div class="field" style="flex:0 0 auto;justify-content:flex-end"><span class="num muted" id="strBb${i}" style="line-height:46px">${bbs(a,bb)} bb</span></div></div>`).join('')}
-        <div class="note">Preflop order: ${info.order.map((p,i)=>i===info.order.length-1?`<b>${p}</b> (last)`:p).join(' → ')}. Stays on for the next hand until you pick None.</div>`:''}`:''}
+        <div class="note">Preflop order: ${info.order.map((p,i)=>i===info.order.length-1?`<b>${p}</b> (last)`:p).join(' → ')}.${info.ula?' With ULA the button only acts once everyone else has finished, even after a raise. If the button raises, normal order resumes.':info.type==='btn'?' If someone raises, the button acts in turn, before the blinds.':''} Stays on for the next hand until you pick None.</div>`:''}`:''}
     </div>
     <div class="prompt">What's <em>your position</em>?</div>
     <div class="posgrid">${pre.map(p=>`<button class="posbtn ${p===h.suggest?'sug':''}" data-a="pos" data-p="${p}">${p}</button>`).join('')}</div>`;
