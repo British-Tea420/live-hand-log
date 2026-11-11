@@ -10,7 +10,7 @@ Everything runs in your browser. There is no account and no server, and your han
 - **Only legal actions.** Each player's turn shows only the moves they can make: Fold / Call / Raise when facing a bet, Check / Bet when not.
 - **Real cash amounts.** Type what was actually bet. It's converted to big blinds as you type, and calls fill in automatically.
 - **"Folds to" shortcut.** Tap a player and everyone before them folds (or checks). Most preflop hands take one tap.
-- **Special hands.** Set a UTG or button straddle on any hand. The action order and minimum raise adjust, and the straddle stays on for later hands until you switch it off.
+- **Straddles.** Pick None, UTG, double, triple or button straddle from a dropdown at the start of any hand and set each amount. The preflop action order is shown on screen and the minimum raise adjusts. On a button straddle the SB acts first and the button acts last. The choice stays on for later hands until you set it back to None.
 - **Stacks.** Your stack is editable at the start of every hand (it also carries over automatically). Tap any player's seat during a hand to enter their stack, for example a short stack about to shove, so all-ins and uncalled bets come out right.
 - **Board and showdown.** You're asked for the flop, turn and river as each betting round closes. At the end you enter your cards and, optionally, your opponents' cards. The winner is worked out for you, side pots included.
 - **Undo** any step. A half-entered hand survives closing the page.
@@ -60,7 +60,7 @@ Hands are stored in your browser's local storage on the device you use. They are
 
 ## Not supported yet
 
-- Antes, double straddles and rake (rake is exported as 0)
+- Antes and rake (rake is exported as 0)
 - Straddles are exported as `posts straddle`. If your tracker rejects those hands, please open an issue.
 - Games other than No-Limit Hold'em
 - If you fold with several opponents still in, the pot is given to the last player who bet or raised. Your own result is still correct.

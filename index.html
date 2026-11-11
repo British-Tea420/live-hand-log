@@ -182,11 +182,37 @@ function positions(n){
 function nextPos(pos,n){const {seats}=positions(n);const i=seats.indexOf(pos);if(i<0)return null;return seats[(i-1+seats.length)%seats.length];}
 
 /* ---------------- hand engine (replays events) ---------------- */
-// Which straddles a table size allows: UTG needs 4+ players, button needs 3+.
-function straddleSpots(n){const {pre}=positions(n);return ['UTG','BTN'].filter(p=>pre.includes(p)&&(p!=='UTG'||n>=4));}
-function validStraddle(sd,n){return sd&&straddleSpots(n).includes(sd.pos)&&sd.amt>0?sd:null;}
-// Preflop order: with a straddle, action starts after the straddler, who acts last.
-function preOrder(h){const {pre}=positions(h.players),sd=validStraddle(h.straddle,h.players);return sd?[...pre.filter(p=>p!==sd.pos),sd.pos]:pre;}
+// Straddle types. Stored on a hand as {type, amts:[...]} (one amount per straddler).
+const STR={
+  utg:   {label:'UTG straddle',k:1},
+  double:{label:'Double straddle',k:2},
+  triple:{label:'Triple straddle',k:3},
+  btn:   {label:'Button straddle',btn:true}
+};
+// Older saves used {pos:'UTG'|'BTN', amt}.
+function normSd(sd){
+  if(!sd||typeof sd!=='object')return null;
+  if(!sd.type&&sd.pos)return normSd({type:sd.pos==='BTN'?'btn':'utg',amts:[sd.amt]});
+  if(!STR[sd.type])return null;
+  const amts=(Array.isArray(sd.amts)?sd.amts:[]).slice(0,3).map(x=>r2(+x)).filter(x=>x>0);
+  return amts.length?{type:sd.type,amts}:null;
+}
+function strAllowed(type,n){const t=STR[type];if(t.btn)return n>=3;return n-2>=Math.max(t.k,2);}
+function strTypes(n){return Object.keys(STR).filter(t=>strAllowed(t,n));}
+function strDefaults(type,bb){const t=STR[type];return t.btn?[r2(bb*2)]:[2,4,8].slice(0,t.k).map(x=>r2(bb*x));}
+// Who posts what, and the preflop action order.
+function straddleInfo(sd,n){
+  sd=normSd(sd);if(!sd||!strAllowed(sd.type,n))return null;
+  const t=STR[sd.type],{pre,post}=positions(n);
+  // Button straddle: the SB acts first and action goes round the table, so the button is last.
+  if(t.btn)return {type:sd.type,label:t.label,posts:[['BTN',sd.amts[0]]],order:post};
+  if(sd.amts.length<t.k)return null;
+  // UTG / double / triple: action starts left of the last straddler; the last straddler acts last.
+  const who=pre.slice(0,t.k);
+  return {type:sd.type,label:t.label,posts:who.map((p,i)=>[p,sd.amts[i]]),order:[...pre.slice(t.k),...who]};
+}
+function preOrder(h){const i=straddleInfo(h.straddle,h.players);return i?i.order:positions(h.players).pre;}
+function strLabel(h,m){const i=straddleInfo(h.straddle,h.players);return i?` · ${i.label} ${i.posts.map(x=>m(x[1])).join('/')}`:'';}
 function replay(h){
   const {pre,post}=positions(h.players),pre0=preOrder(h);
   const P={};
@@ -197,8 +223,8 @@ function replay(h){
   const sbp=h.players===2?'BTN':'SB';
   put(sbp,h.sb);put('BB',h.bb);
   st.blinds=[[sbp,P[sbp].in],['BB',P.BB.in]];
-  const sd=validStraddle(h.straddle,h.players);
-  if(sd){put(sd.pos,sd.amt);st.straddle=[sd.pos,P[sd.pos].in];}
+  const sd=straddleInfo(h.straddle,h.players);st.straddles=[];
+  if(sd)for(const [sp,amt] of sd.posts){const a=put(sp,amt);st.straddles.push([sp,a]);}
   st.curBet=Math.max(...pre.map(p=>P[p].in));
   if(sd&&st.curBet>h.bb)st.minRaise=st.curBet;
   st.posted=r2(pre.reduce((a,p)=>a+P[p].in,0));
@@ -361,7 +387,7 @@ function handText(h,sess){
   for(const p of seats)L.push(`Seat ${seatNo(p)}: ${name(p)} (${m(P[p].start)} in chips)`);
   L.push(`${name(st.blinds[0][0])}: posts small blind ${m(st.blinds[0][1])}`);
   L.push(`${name('BB')}: posts big blind ${m(st.blinds[1][1])}`);
-  if(st.straddle)L.push(`${name(st.straddle[0])}: posts straddle ${m(st.straddle[1])}`);
+  for(const [sp,a] of st.straddles)L.push(`${name(sp)}: posts straddle ${m(a)}`);
   L.push('*** HOLE CARDS ***');
   if(h.heroCards&&h.heroCards.length===2)L.push(`Dealt to ${name(h.pos)} [${h.heroCards.join(' ')}]`);
   const board=[];
@@ -512,23 +538,22 @@ function vHand(){
   const h=ui.hand,s=S(),cur=s.cur,m=x=>money(x,cur),bb=h.bb;
   const head=(sub,undo=true)=>`<div class="top">
     <button class="ib" data-a="leaveHand" aria-label="Back to session">←</button>
-    <div class="grow"><h2>Hand #${h.n}${h.pos?` · you're ${h.pos}`:''}</h2><div class="sub num">${m(h.sb)}/${m(h.bb)}${h.straddle?` · ${h.straddle.pos==='BTN'?'button':'UTG'} straddle ${m(h.straddle.amt)}`:''} · ${h.players}-handed${sub?' · '+sub:''}</div></div>
+    <div class="grow"><h2>Hand #${h.n}${h.pos?` · you're ${h.pos}`:''}</h2><div class="sub num">${m(h.sb)}/${m(h.bb)}${strLabel(h,m)} · ${h.players}-handed${sub?' · '+sub:''}</div></div>
     ${undo?`<button class="ib" data-a="undo">Undo</button>`:''}
     <button class="ib ${ui.confirm==='discard'?'warn':''}" data-a="discard">${ui.confirm==='discard'?'Discard?':'✕'}</button></div>`;
   if(h.stage==='pos'){
-    const {pre}=positions(h.players),spots=straddleSpots(h.players),sd=h.straddle;
+    const {pre}=positions(h.players),types=strTypes(h.players),info=straddleInfo(h.straddle,h.players);
     return `${head('',false)}
     <div class="panel">
       <div class="row">
         <div class="field"><label class="lbl" for="heroStackIn">Your stack</label><input id="heroStackIn" inputmode="decimal" value="${h.heroStack}" autocomplete="off"></div>
         <div class="field" style="flex:0 0 auto;justify-content:flex-end"><span class="num muted" id="heroStackBb" style="line-height:46px">${bbs(h.heroStack,bb)} bb</span></div>
       </div>
-      ${spots.length?`<div class="field"><span class="lbl">Straddle this hand</span><div class="chips">
-        <button class="chip ${!sd?'on':''}" data-a="straddle" data-p="">None</button>
-        ${spots.map(p=>`<button class="chip ${sd&&sd.pos===p?'on':''}" data-a="straddle" data-p="${p}">${p==='BTN'?'Button':'UTG'}</button>`).join('')}</div></div>
-      ${sd?`<div class="row"><div class="field"><label class="lbl" for="strAmt">Straddle amount</label><input id="strAmt" inputmode="decimal" value="${sd.amt}" autocomplete="off"></div>
-        <div class="field" style="flex:0 0 auto;justify-content:flex-end"><span class="num muted" id="strBb" style="line-height:46px">${bbs(sd.amt,bb)} bb</span></div></div>
-        <div class="note">${sd.pos==='BTN'?'Action starts UTG; the button acts last preflop.':'Action starts left of UTG; UTG acts last preflop.'} Stays on for the next hand until you pick None.</div>`:''}`:''}
+      ${types.length?`<div class="field"><label class="lbl" for="strType">Straddle this hand</label><select id="strType">
+        <option value="">None</option>${types.map(t=>`<option value="${t}" ${info&&info.type===t?'selected':''}>${STR[t].label}</option>`).join('')}</select></div>
+      ${info?`${info.posts.map(([sp,a],i)=>`<div class="row"><div class="field"><label class="lbl" for="strAmt${i}">${sp} posts</label><input id="strAmt${i}" data-i="${i}" class="stramt" inputmode="decimal" value="${a}" autocomplete="off"></div>
+        <div class="field" style="flex:0 0 auto;justify-content:flex-end"><span class="num muted" id="strBb${i}" style="line-height:46px">${bbs(a,bb)} bb</span></div></div>`).join('')}
+        <div class="note">Preflop order: ${info.order.map((p,i)=>i===info.order.length-1?`<b>${p}</b> (last)`:p).join(' → ')}. Stays on for the next hand until you pick None.</div>`:''}`:''}
     </div>
     <div class="prompt">What's <em>your position</em>?</div>
     <div class="posgrid">${pre.map(p=>`<button class="posbtn ${p===h.suggest?'sug':''}" data-a="pos" data-p="${p}">${p}</button>`).join('')}</div>`;
@@ -639,7 +664,7 @@ const splitCards=s=>(String(s||'').match(/[2-9TJQKA][shdc]/g)||[]);
 function encodeHand(h,cur){
   const e=h.events.map(ev=>ev.t==='board'?ev.cards.join(''):`${ev.p} ${ev.a}${ev.allin?'!':ev.to!=null?ev.to:''}`);
   const sh={};for(const [k,v] of Object.entries(h.shown||{}))if(v&&v.length===2)sh[k]=v.join('');
-  return b64u(JSON.stringify({v:1,n:h.players,sb:h.sb,bb:h.bb,c:cur,hs:h.heroStack,vs:h.vStack,p:h.pos,e,hc:(h.heroCards||[]).join(''),sh,w:h.winners||[],t:h.at,...(h.straddle?{sd:[h.straddle.pos,h.straddle.amt]}:{}),...(h.stacks&&Object.keys(h.stacks).length?{k:h.stacks}:{})}));
+  return b64u(JSON.stringify({v:1,n:h.players,sb:h.sb,bb:h.bb,c:cur,hs:h.heroStack,vs:h.vStack,p:h.pos,e,hc:(h.heroCards||[]).join(''),sh,w:h.winners||[],t:h.at,...(normSd(h.straddle)?{sd:[normSd(h.straddle).type,...normSd(h.straddle).amts]}:{}),...(h.stacks&&Object.keys(h.stacks).length?{k:h.stacks}:{})}));
 }
 function decodeHand(str){
   const o=JSON.parse(unb64u(str));
@@ -654,7 +679,7 @@ function decodeHand(str){
   const shown={};for(const [k,v] of Object.entries(o.sh||{}))if(pre.includes(k))shown[k]=splitCards(v).slice(0,2);
   const h={id:'h'+uid36(),n:0,at:+o.t||Date.now(),players:n,sb:r2(+o.sb),bb:r2(+o.bb),heroStack:r2(+o.hs),vStack:r2(+o.vs),pos:o.p,events,
     heroCards:splitCards(o.hc).slice(0,2),shown,winners:(o.w||[]).filter(p=>pre.includes(p)),
-    straddle:Array.isArray(o.sd)?validStraddle({pos:o.sd[0],amt:r2(+o.sd[1])},n):null,stacks:cleanStacks(o.k,pre)};
+    straddle:Array.isArray(o.sd)?(STR[o.sd[0]]?normSd({type:o.sd[0],amts:o.sd.slice(1)}):normSd({pos:o.sd[0],amt:o.sd[1]})):null,stacks:cleanStacks(o.k,pre)};
   if(!(h.sb>0&&h.bb>0&&h.heroStack>0&&h.vStack>0))throw new Error('stakes');
   replay(h);
   return {h,cur:CUR[o.c]?o.c:'GBP'};
@@ -668,11 +693,11 @@ function readable(h,cur,unit){
   const L=[];
   L.push(`NL Hold'em ${money(h.sb,cur)}/${money(h.bb,cur)} · ${h.players}-handed`);
   L.push(`Hero ${h.pos} · ${A(st.P[h.pos].start)} stack${h.heroCards&&h.heroCards.length===2?' · '+cs(h.heroCards):''}`);
-  if(st.straddle)L.push(`${nm(st.straddle[0])} straddles ${A(st.straddle[1])}`);
+  for(const [sp,a] of st.straddles)L.push(`${nm(sp)} straddles ${A(a)}`);
   const short=Object.keys(h.stacks||{}).filter(p=>p!==h.pos&&st.pre.includes(p));
   if(short.length)L.push('Stacks: '+short.map(p=>`${p} ${A(st.P[p].start)}`).join(', ')+` · others ${A(h.vStack)}`);
   // pot shown at each street leaves out any bet nobody could call
-  const tot={};st.pre.forEach(p=>tot[p]=0);st.blinds.forEach(([p,a])=>tot[p]+=a);if(st.straddle)tot[st.straddle[0]]+=st.straddle[1];
+  const tot={};st.pre.forEach(p=>tot[p]=0);st.blinds.forEach(([p,a])=>tot[p]+=a);for(const [sp,a] of st.straddles)tot[sp]+=a;
   const potNow=()=>{const v=Object.values(tot).sort((a,b)=>b-a);return r2(v.reduce((a,b)=>a+b,0)-(v[0]-v[1]));};
   const heads=['Preflop','','',''],parts=[[],[],[],[]];
   for(const e of st.log){
@@ -725,7 +750,7 @@ function vShared(){
   if(ev){if(ev.t==='board')last=['','Flop','Turn','River'][st.street]+' '+ev.cards.map(c=>(c[0]==='T'?'10':c[0])+SYM[c[1]]).join(' ');
     else{const e=st.log[st.log.length-1];const W={f:'folds',x:'checks',c:'calls',b:'bets',r:'raises to'};last=`${e.p===h.pos?'Hero':e.p} ${W[e.a]}${e.a==='c'?' '+m(e.amt):e.a==='b'||e.a==='r'?' '+m(e.to):''}${e.allin?' all-in':''}`;}}
   if(end){const r=resolve(h);last+=r.st.done==='herofold'?' · Hero folded':` · ${Object.keys(r.col).map(p=>p===h.pos?'Hero':p).join(' & ')} won`;}
-  return `<div class="top"><button class="ib" data-a="closeShared" aria-label="Close">✕</button><div class="grow"><h2>Shared hand</h2><div class="sub num">${m(h.sb)}/${m(h.bb)}${h.straddle?` · ${h.straddle.pos==='BTN'?'button':'UTG'} straddle ${m(h.straddle.amt)}`:''} · ${h.players}-handed · Hero is ${h.pos}</div></div></div>
+  return `<div class="top"><button class="ib" data-a="closeShared" aria-label="Close">✕</button><div class="grow"><h2>Shared hand</h2><div class="sub num">${m(h.sb)}/${m(h.bb)}${strLabel(h,m)} · ${h.players}-handed · Hero is ${h.pos}</div></div></div>
   ${tablePanel(h,st,m,end)}
   <div class="panel"><div class="grp"><span class="lbl" style="flex:1">Step ${ui.step} of ${n}</span></div><div class="lastact">${esc(last)}</div>
     <div class="steps"><button class="btn ghost" data-a="step" data-s="first" aria-label="Start">⏮</button><button class="btn ghost" data-a="step" data-s="-1" aria-label="Back one step">◀</button><button class="btn primary" data-a="step" data-s="1" aria-label="Next step">▶</button><button class="btn ghost" data-a="step" data-s="last" aria-label="End">⏭</button></div></div>
@@ -768,7 +793,7 @@ function startHand(){
   const hero=s.heroStack>0?s.heroStack:s.stack;
   ui.hand={id:'h'+uid36(),sid:s.id,n:hs.length+1,at:Date.now(),players:s.players,sb:s.sb,bb:s.bb,cur:s.cur,
     heroStack:hero,vStack:Math.max(s.stack,1),pos:null,events:[],heroCards:[],shown:{},winners:[],stage:'pos',
-    straddle:validStraddle(s.lastStraddle,s.players),stacks:{},
+    straddle:straddleInfo(s.lastStraddle,s.players)?normSd(s.lastStraddle):null,stacks:{},
     suggest:last&&last.players===s.players?nextPos(last.pos,s.players):null};
   ui.pad=null;ui.stackPad=null;ui.pick=null;ui.amt='';saveDraft();go('hand');
 }
@@ -777,7 +802,7 @@ function pushEvent(ev){
   const st=replay(h);if(st.done)h.stage='finish';
   saveDraft();
 }
-function summarize(h,r){const t=summarize0(h,r);return h.straddle?t+' · straddled':t;}
+function summarize(h,r){const t=summarize0(h,r),i=straddleInfo(h.straddle,h.players);return i?t+' · '+i.label.toLowerCase():t;}
 function summarize0(h,r){
   const st=r.st;const lastStreet=['preflop','flop','turn','river'][st.street];
   if(st.done==='herofold')return `Folded ${lastStreet}`;
@@ -788,7 +813,7 @@ function saveHand(){
   const h=ui.hand,s=S(),r=resolve(h);
   const out={id:h.id,sid:h.sid,n:h.n,at:h.at,players:h.players,sb:h.sb,bb:h.bb,heroStack:h.heroStack,vStack:h.vStack,pos:h.pos,
     events:h.events,heroCards:h.heroCards,shown:h.shown,winners:h.winners,net:r.net,summary:summarize(h,r),
-    straddle:validStraddle(h.straddle,h.players),stacks:h.stacks||{}};
+    straddle:straddleInfo(h.straddle,h.players)?normSd(h.straddle):null,stacks:h.stacks||{}};
   putHand(out);
   s.heroStack=r2(h.heroStack+r.net);putSession(s);
   ui.hand=null;saveDraft();
@@ -875,8 +900,6 @@ function act(a,d){
     case 'unpickF':{const arr=d.g===h.pos?h.heroCards:h.shown[d.g];arr.splice(+d.i,1);ui.pick=d.g;h.winners=[];saveDraft();return render();}
     case 'winner':{const i=h.winners.indexOf(d.p);if(i>=0)h.winners.splice(i,1);else h.winners.push(d.p);saveDraft();return render();}
     case 'saveHand':return saveHand();
-    case 'straddle':{const spot=d.p;if(!spot)h.straddle=null;else h.straddle={pos:spot,amt:h.straddle&&h.straddle.amt>0?h.straddle.amt:r2(h.bb*2)};
-      const s=S();s.lastStraddle=h.straddle;putSession(s);saveDraft();return render();}
     case 'seatStack':ui.stackPad=ui.stackPad===d.p?null:d.p;ui.pad=null;ui.amt='';return render();
     case 'stackCancel':ui.stackPad=null;ui.amt='';return render();
     case 'stackReset':if(h.stacks)delete h.stacks[ui.stackPad];ui.stackPad=null;ui.amt='';saveDraft();return render();
@@ -911,13 +934,17 @@ document.addEventListener('input',e=>{
   const h=ui.hand;if(!h||ui.view!=='hand')return;
   if(e.target.id==='heroStackIn'){const v=r2(parseFloat(e.target.value));const lab=document.getElementById('heroStackBb');
     if(v>0){h.heroStack=v;saveDraft();if(lab)lab.textContent=bbs(v,h.bb)+' bb';}else if(lab)lab.textContent='– bb';}
-  if(e.target.id==='strAmt'&&h.straddle){const v=r2(parseFloat(e.target.value));const lab=document.getElementById('strBb');
-    if(v>0){h.straddle.amt=v;saveDraft();if(lab)lab.textContent=bbs(v,h.bb)+' bb';}else if(lab)lab.textContent='– bb';}
+  if(e.target.classList.contains('stramt')&&h.straddle){const i=+e.target.dataset.i,v=r2(parseFloat(e.target.value));const lab=document.getElementById('strBb'+i);
+    if(v>0){h.straddle.amts[i]=v;saveDraft();if(lab)lab.textContent=bbs(v,h.bb)+' bb';}else if(lab)lab.textContent='– bb';}
 });
 document.addEventListener('change',e=>{
   const h=ui.hand;if(!h)return;const s=S();if(!s)return;
   if(e.target.id==='heroStackIn'&&h.heroStack>0){s.heroStack=h.heroStack;putSession(s);}
-  if(e.target.id==='strAmt'&&h.straddle){s.lastStraddle={...h.straddle};putSession(s);}
+  if(e.target.classList.contains('stramt')&&h.straddle){s.lastStraddle=normSd(h.straddle);putSession(s);}
+  if(e.target.id==='strType'){const t=e.target.value;
+    if(!t)h.straddle=null;
+    else{const old=normSd(h.straddle),def=strDefaults(t,h.bb);h.straddle={type:t,amts:def.map((x,i)=>old&&old.amts[i]&&!!STR[t].btn===!!STR[old.type].btn?old.amts[i]:x)};}
+    s.lastStraddle=normSd(h.straddle);putSession(s);saveDraft();render();}
 });
 document.addEventListener('keydown',e=>{
   if(ui.view!=='hand'||e.target.tagName==='INPUT')return;
@@ -961,7 +988,7 @@ document.addEventListener('change',async e=>{
         players:Math.min(10,Math.max(2,Math.round(+v.players)||9)),heroStack:num(v.heroStack,200),stack:num(v.stack,200),
         heroName:String(v.heroName||'Hero').replace(/[:\[\]<>]/g,'').slice(0,30)||'Hero',createdAt:num(v.createdAt,Date.now()),
         updatedAt:num(v.updatedAt,0),deleted:!!v.deleted,shared:!!v.shared,
-        lastStraddle:v.lastStraddle?{pos:v.lastStraddle.pos==='BTN'?'BTN':'UTG',amt:num(v.lastStraddle.amt,0)}:null};}
+        lastStraddle:normSd(v.lastStraddle)};}
     for(const v of Object.values(d.hands||{})){
       try{if(!v||!okId(v.id)||!okId(v.sid))continue;
         const players=Math.min(10,Math.max(2,Math.round(+v.players)||9)),pre=positions(players).pre;
@@ -974,7 +1001,7 @@ document.addEventListener('change',async e=>{
         const h={id:v.id,sid:v.sid,n:Math.max(1,Math.round(+v.n)||1),at:num(v.at,Date.now()),players,sb:num(v.sb,1),bb:num(v.bb,2),
           heroStack:num(v.heroStack,200),vStack:num(v.vStack,200),pos:v.pos,events,heroCards:cards(v.heroCards),shown,
           winners:(v.winners||[]).filter(p=>pre.includes(p)),updatedAt:num(v.updatedAt,0),deleted:!!v.deleted,
-          straddle:v.straddle?validStraddle({pos:v.straddle.pos,amt:num(v.straddle.amt,0)},players):null,stacks:cleanStacks(v.stacks,pre)};
+          straddle:straddleInfo(v.straddle,players)?normSd(v.straddle):null,stacks:cleanStacks(v.stacks,pre)};
         const r=resolve(h);h.net=r.net;h.summary=summarize(h,r);hands[h.id]=h;
       }catch(err){}
     }
