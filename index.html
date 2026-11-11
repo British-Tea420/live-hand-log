@@ -149,6 +149,8 @@ h2{font-size:22px;font-weight:600}
 .seg button{height:36px;padding:0 14px;font-weight:600;font-size:14px;background:var(--surface2)}
 .seg button.on{background:var(--accent);color:var(--accent-ink)}
 .note{font-size:13px;color:var(--muted)}
+.notesnip{font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.field textarea{border-radius:10px;border:1px solid var(--line);background:var(--surface2);color:var(--ink);padding:10px 12px;font:inherit;font-size:16px;width:100%;box-sizing:border-box;resize:vertical}
 .steps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
 .lastact{font-family:var(--font-d);font-size:22px;font-weight:600;min-height:28px}
 </style>
@@ -215,16 +217,7 @@ function straddleInfo(sd,n){
 }
 // Antes: 'all' = every player posts, 'bb' = big blind posts one ante for the table. Antes are dead money.
 function normAnte(a){if(!a||typeof a!=='object'||!['all','bb'].includes(a.type))return null;const amt=r2(+a.amt);return amt>0?{type:a.type,amt}:null;}
-// Rake: percentage of the pot with an optional cap, or a fixed amount per hand; optional "no flop, no drop".
-function normRake(r){
-  if(!r||typeof r!=='object'||!['pct','fixed'].includes(r.type))return null;
-  const o={type:r.type,nfnd:!!r.nfnd};
-  if(r.type==='pct'){o.pct=Math.min(25,Math.max(0,+r.pct||0));o.cap=Math.max(0,r2(+r.cap||0));if(!(o.pct>0))return null;}
-  else{o.fixed=Math.max(0,r2(+r.fixed||0));if(!(o.fixed>0))return null;}
-  return o;
-}
 function anteLabel(a,m){a=normAnte(a);return a?(a.type==='bb'?`BB ante ${m(a.amt)}`:`${m(a.amt)} ante each`):'';}
-function rakeLabel(r,m){r=normRake(r);if(!r)return 'No rake';return (r.type==='pct'?`${r.pct}% rake${r.cap?`, ${m(r.cap)} cap`:''}`:`${m(r.fixed)} rake per hand`)+(r.nfnd?', no flop no drop':'');}
 function preOrder(h){const i=straddleInfo(h.straddle,h.players);return i?i.order:positions(h.players).pre;}
 function strLabel(h,m){const i=straddleInfo(h.straddle,h.players),a=anteLabel(h.ante,m);return (a?' · '+a:'')+(i?` · ${i.label} ${i.posts.map(x=>m(x[1])).join('/')}`:'');}
 function replay(h){
@@ -379,13 +372,7 @@ function resolve(h){
   if(pots.length&&betTotal>sumP)pots[pots.length-1].amt=r2(pots[pots.length-1].amt+betTotal-sumP);
   if(!pots.length)pots.push({amt:0,el:live});
   pots[0].amt=r2(pots[0].amt+antes);
-  // Rake comes off the pot before it is paid out, main pot first.
-  const rk=normRake(h.rake);let rake=0;
-  if(rk&&!(rk.nfnd&&st.board.length===0)){
-    if(rk.type==='pct'){rake=Math.floor(Math.round(total*100)*rk.pct/100)/100;if(rk.cap>0)rake=Math.min(rake,rk.cap);}
-    else rake=Math.min(rk.fixed,total);
-  }
-  rake=r2(rake);{let left=rake;for(const pot of pots){const t=Math.min(left,pot.amt);pot.amt=r2(pot.amt-t);left=r2(left-t);}}
+
   const cardsOf=p=>p===h.pos?(h.heroCards||[]):((h.shown||{})[p]||[]);
   const val={};
   if(st.board.length===5)for(const p of live)if(cardsOf(p).length===2)val[p]=best([...cardsOf(p),...st.board]);
@@ -400,7 +387,7 @@ function resolve(h){
   }
   const hero=h.pos;
   const net=r2((col[hero]||0)+(refund&&refund.p===hero?refund.amt:0)-P[hero].tot);
-  return {st,refund,pots,col,val,total,rake,live,net,cardsOf};
+  return {st,refund,pots,col,val,total,live,net,cardsOf};
 }
 function canAutoWinner(h,st){
   const live=st.pre.filter(p=>!st.P[p].folded);
@@ -416,7 +403,8 @@ function etStamp(ms){
     return `${g('year')}/${g('month')}/${g('day')} ${hh}:${g('minute')}:${g('second')} ET`;
   }catch(e){const d=new Date(ms);const z=n=>String(n).padStart(2,'0');return `${d.getFullYear()}/${z(d.getMonth()+1)}/${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())} ET`;}
 }
-function handText(h,sess){
+const cleanNote=t=>String(t||'').replace(/[\u0000-\u0009\u000B-\u001F]/g,' ').slice(0,500).trim();
+function handText(h,sess,withNotes){
   const res=resolve(h),{st,refund,pots,col,val}=res,P=st.P,code=sess.cur||'GBP',m=x=>money(x,code);
   const name=p=>p===h.pos?(sess.heroName||'Hero'):p;
   const {seats}=positions(h.players);
@@ -460,8 +448,10 @@ function handText(h,sess){
     pot.split.forEach(([p,a])=>L.push(`${name(p)} collected ${m(a)} from ${lbl}`));
   });
   if(!sd&&live.length===1)L.push(`${name(live[0])}: doesn't show hand`);
+  // Notes go in as a chat line from you, which trackers read without affecting stats.
+  if(withNotes&&cleanNote(h.note))L.push(`${name(h.pos)} said, "Note: ${cleanNote(h.note).replace(/\s*\n\s*/g,' / ').replace(/"/g,"'")}"`);
   L.push('*** SUMMARY ***');
-  const potStr=pots.length>1?`Total pot ${m(res.total)} Main pot ${m(pots[0].amt)}. ${pots.slice(1).map((p,i)=>`Side pot-${i+1} ${m(p.amt)}.`).join(' ')} | Rake ${m(res.rake)}`:`Total pot ${m(res.total)} | Rake ${m(res.rake)}`;
+  const potStr=pots.length>1?`Total pot ${m(res.total)} Main pot ${m(pots[0].amt)}. ${pots.slice(1).map((p,i)=>`Side pot-${i+1} ${m(p.amt)}.`).join(' ')} | Rake ${m(0)}`:`Total pot ${m(res.total)} | Rake ${m(0)}`;
   L.push(potStr);
   if(st.board.length)L.push(`Board [${st.board.join(' ')}]`);
   const STN=['before Flop','on the Flop','on the Turn','on the River'];
@@ -494,7 +484,7 @@ async function askPersist(){try{if(navigator.storage&&navigator.storage.persist)
 function syncHTML(){return `<span class="sync"><span class="dot ok"></span>Stored only on this device · back up from the home screen</span>`;}
 
 /* ---------------- UI state ---------------- */
-const ui={view:'home',sid:null,hand:null,pad:null,amt:'',pick:null,detail:null,exportText:null,confirm:null,setupPlayers:9,editStack:false};
+const ui={view:'home',sid:null,hand:null,pad:null,amt:'',pick:null,detail:null,exportText:null,confirm:null,setupPlayers:8,editStack:false};
 function saveDraft(){try{if(ui.hand)localStorage.setItem(DRAFTKEY,JSON.stringify(ui.hand));else localStorage.removeItem(DRAFTKEY);}catch(e){}}
 function loadDraft(){try{const d=JSON.parse(localStorage.getItem(DRAFTKEY)||'null');if(d&&d.sid)return d;}catch(e){}return null;}
 let toastT;function toast(t){const el=document.getElementById('toast');el.textContent=t;el.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>el.hidden=true,2600);}
@@ -512,12 +502,17 @@ function vHome(){
   ${ss.length?`<div class="lbl">Sessions</div><div class="list">${ss.map(s=>{const t=sessStats(s.id);return `<button class="li" data-a="open" data-id="${s.id}">
       <div class="grow"><div class="t">${esc(s.name)}</div><div class="s num">${money(s.sb,s.cur)}/${money(s.bb,s.cur)} · ${s.players}-handed · ${new Date(s.createdAt).toLocaleDateString()} · ${t.n} hand${t.n===1?'':'s'}</div></div>
       <div class="res num ${t.net>0?'pos':t.net<0?'neg':''}">${signed(t.net,money(Math.abs(t.net),s.cur))}<div class="s">${signed(t.nbb,Math.abs(t.nbb)+' bb')}</div></div></button>`;}).join('')}</div>
-    <button class="btn ghost" data-a="exportAll">Export all hands (.txt)</button>
+    ${ui.exportAsk==='exportAll'?exportAskHTML():`<button class="btn ghost" data-a="exportAll">Export all hands (.txt)</button>`}
     <div class="panel"><div class="lbl">Backup</div><div class="note">Your hands are stored only in this browser. Clearing browser data deletes them, so save a backup file now and then.</div>
     <div class="row"><button class="btn ghost" data-a="backup">Save backup</button><button class="btn ghost" data-a="restore">Restore backup</button></div></div>`
   :`<div class="panel"><div class="lbl">How it works</div><div>1. Start a session with your stakes and table size, once.<br>2. Each hand: tap your position, then tap each player's action as it happens. Only legal actions are shown. Type real cash amounts; they're shown in big blinds as you type.<br>3. Enter the board when each street ends, and your cards at the end.<br>4. Export the session as a PokerStars-format .txt file and import it into PokerTracker, Holdem Manager or Hand2Note.<br>5. Share any hand as a link or text so a friend can review it.</div></div>
     <button class="btn ghost" data-a="restore">Restore from a backup file</button>`}
   <input type="file" id="restoreFile" accept=".json,application/json" hidden>`;
+}
+function exportAskHTML(){
+  return `<div class="panel"><div><b>Include your notes?</b><div class="note">Notes are added to each hand as a chat line from you, so your tracker keeps them without changing your stats.</div></div>
+    <div class="row"><button class="btn primary" data-a="doExport" data-what="${ui.exportAsk}" data-notes="1">With notes</button><button class="btn ghost" data-a="doExport" data-what="${ui.exportAsk}" data-notes="0">Without notes</button></div>
+    <button class="btn ghost" data-a="exportCancel" style="height:40px;font-size:15px">Cancel</button></div>`;
 }
 function vSetup(){
   const n=ui.setupPlayers,types=strTypes(n);
@@ -541,30 +536,22 @@ function vSetup(){
     </div>
     ${types.length?`<div class="field"><label class="lbl" for="sStrType">Straddle (every hand)</label><select id="sStrType"><option value="">No straddle</option>${types.map(t=>`<option value="${t}">${STR[t].label}</option>`).join('')}</select></div>
     <div class="row" id="gStr" hidden>${[0,1,2].map(i=>`<div class="field" id="gStr${i}"><label class="lbl" for="sStr${i}">${['1st','2nd','3rd'][i]} straddle</label><input id="sStr${i}" inputmode="decimal" placeholder="${[2,4,8][i]}× big blind" autocomplete="off"></div>`).join('')}</div>`:''}
-    <div class="field"><label class="lbl" for="sRakeType">Rake</label><select id="sRakeType"><option value="">No rake (time charge)</option><option value="pct">Percentage of the pot</option><option value="fixed">Fixed amount per hand</option></select></div>
-    <div class="row" id="gRakePct" hidden>
-      <div class="field"><label class="lbl" for="sRakePct">Rake %</label><input id="sRakePct" inputmode="decimal" placeholder="e.g. 5" autocomplete="off"></div>
-      <div class="field"><label class="lbl" for="sRakeCap">Cap per hand</label><input id="sRakeCap" inputmode="decimal" placeholder="No cap" autocomplete="off"></div>
-    </div>
-    <div class="field" id="gRakeFixed" hidden><label class="lbl" for="sRakeFixed">Rake per hand</label><input id="sRakeFixed" inputmode="decimal" placeholder="e.g. 2" autocomplete="off"></div>
-    <label class="grp" id="gNfnd" hidden style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><input type="checkbox" id="sNfnd" checked style="width:20px;height:20px;flex:0 0 auto;margin:0"> <span style="flex:1;min-width:0">No flop, no drop (no rake if the hand ends before the flop)</span></label>
     <div class="field"><label class="lbl" for="sName2">Your screen name in exports</label><input id="sName2" placeholder="Hero" autocomplete="off"></div>
     <div id="setupErr" class="warnmsg" hidden></div>
     <button class="btn primary" type="submit">Start session</button>
   </form>`;
 }
-// Show only the inputs that the chosen ante, straddle and rake options need.
+// Show only the inputs that the chosen ante and straddle options need.
 function syncSetup(){
   const v=id=>{const el=document.getElementById(id);return el?el.value:'';},show=(id,on)=>{const el=document.getElementById(id);if(el)el.hidden=!on;};
   show('gAnte',!!v('sAnteType'));
   const t=v('sStrType'),k=t?(STR[t].btn?1:STR[t].k):0;show('gStr',k>0);[0,1,2].forEach(i=>show('gStr'+i,i<k));
   if(t&&STR[t].btn){const l=document.querySelector('label[for="sStr0"]');if(l)l.textContent='Button straddle';}
   else{const l=document.querySelector('label[for="sStr0"]');if(l)l.textContent='1st straddle';}
-  const r=v('sRakeType');show('gRakePct',r==='pct');show('gRakeFixed',r==='fixed');show('gNfnd',!!r);
 }
 function vSession(){
   const s=S(),t=sessStats(s.id),hs=handsOf(s.id).slice().reverse(),draft=ui.hand&&ui.hand.sid===s.id;
-  return `<div class="top"><button class="ib" data-a="home" aria-label="Back">←</button><div class="grow"><h2>${esc(s.name)}</h2><div class="sub num">${money(s.sb,s.cur)}/${money(s.bb,s.cur)} ${s.cur}${s.ante?' · '+anteLabel(s.ante,x=>money(x,s.cur)):''} · ${rakeLabel(s.rake,x=>money(x,s.cur))} · your stack ${money(s.heroStack,s.cur)} (${bbs(s.heroStack,s.bb)} bb)</div></div></div>
+  return `<div class="top"><button class="ib" data-a="home" aria-label="Back">←</button><div class="grow"><h2>${esc(s.name)}</h2><div class="sub num">${money(s.sb,s.cur)}/${money(s.bb,s.cur)} ${s.cur}${s.ante?' · '+anteLabel(s.ante,x=>money(x,s.cur)):''} · your stack ${money(s.heroStack,s.cur)} (${bbs(s.heroStack,s.bb)} bb)</div></div></div>
   <div class="stats num">
     <div class="stat"><span class="lbl">Hands</span><b>${t.n}</b></div>
     <div class="stat"><span class="lbl">Won</span><b class="${t.net>0?'pos':t.net<0?'neg':''}">${signed(t.net,money(Math.abs(t.net),s.cur))}</b></div>
@@ -575,12 +562,12 @@ function vSession(){
   <div class="panel"><div class="grp"><span class="lbl" style="flex:1">Players at the table now</span>
     <button class="ib" data-a="players" data-d="-1" aria-label="One fewer player">−</button><b class="disp num" style="font-size:24px;min-width:28px;text-align:center">${s.players}</b><button class="ib" data-a="players" data-d="1" aria-label="One more player">+</button></div>
     <div class="muted" style="font-size:13px">Changes apply from the next hand.</div></div>
-  <div class="row"><button class="btn ghost" data-a="export">Export .txt</button><button class="btn ghost" data-a="showText">View text</button></div>
+  ${ui.exportAsk&&ui.exportAsk!=='exportAll'?exportAskHTML():`<div class="row"><button class="btn ghost" data-a="export">Export .txt</button><button class="btn ghost" data-a="showText">View text</button></div>`}
   ${syncHTML()}
   <div class="lbl">Hands</div>
   ${hs.length?`<div class="list">${hs.map(h=>`<button class="li" data-a="detail" data-id="${h.id}">
       <span class="posbadge">${esc(h.pos)}</span>
-      <div class="grow"><div class="t">#${h.n} ${h.heroCards&&h.heroCards.length?cardsHTML(h.heroCards,true):''}</div><div class="s">${esc(h.summary||'')}</div></div>
+      <div class="grow"><div class="t">#${h.n} ${h.heroCards&&h.heroCards.length?cardsHTML(h.heroCards,true):''}</div><div class="s">${esc(h.summary||'')}</div>${cleanNote(h.note)?`<div class="s notesnip">“${esc(cleanNote(h.note))}”</div>`:''}</div>
       <div class="res num ${h.net>0?'pos':h.net<0?'neg':''}">${signed(h.net,Math.abs(bbs(h.net,h.bb))+' bb')}<div class="s">${signed(h.net,money(Math.abs(h.net),s.cur))}</div></div></button>`).join('')}</div>`
   :`<div class="list"><div class="empty">No hands yet. Tap <b>New hand</b> when the cards are dealt.</div></div>`}
   ${ui.confirm==='delSession'?`<button class="btn ghost" style="color:var(--loss)" data-a="delSession">Tap again to delete this session</button>`:`<button class="btn ghost muted" data-a="delSession">Delete session</button>`}`;
@@ -588,9 +575,11 @@ function vSession(){
 function vDetail(){
   const h=DATA.hands[ui.detail],s=S();
   return `<div class="top"><button class="ib" data-a="back" aria-label="Back">←</button><div class="grow"><h2>Hand #${h.n} · ${h.pos}</h2><div class="sub">${new Date(h.at).toLocaleTimeString()}</div></div><button class="ib" data-a="share" data-id="${h.id}">Share</button></div>
+  <div class="field"><label class="lbl" for="noteIn">Note</label><textarea id="noteIn" maxlength="500" rows="3" placeholder="e.g. Player is known to overbluff">${esc(h.note||'')}</textarea>
+    <div class="grp"><span class="note" id="noteState" style="flex:1">${cleanNote(h.note)?'Saved':'Only you see notes unless you choose to include them.'}</span><button class="ib" data-a="saveNote">Save note</button></div></div>
   <div class="row"><button class="btn primary" data-a="share" data-id="${h.id}">Share for review</button><button class="btn ghost" data-a="copyHH">Copy tracker text</button></div>
   <div class="lbl">Tracker format</div>
-  <pre class="hh" id="hhText">${esc(handText(h,s))}</pre>
+  <pre class="hh" id="hhText">${esc(handText(h,s,true))}</pre>
   ${ui.confirm==='delHand'?`<button class="btn ghost" style="color:var(--loss)" data-a="delHand">Tap again to delete hand #${h.n}</button>`:`<button class="btn ghost" data-a="delHand">Delete hand</button>`}`;
 }
 function vText(){
@@ -713,6 +702,7 @@ function vFinish(h,st,m){
     ${groups.map(grp).join('')}
     ${pickerHTML(used,'pickF')}
     ${winner}${net}
+    <div class="field"><label class="lbl" for="handNote">Note (optional)</label><textarea id="handNote" maxlength="500" rows="2" placeholder="e.g. Player is known to overbluff">${esc(h.note||'')}</textarea></div>
     <button class="btn primary" data-a="saveHand" ${ready?'':'disabled'}>${ready?'Save hand':'Enter your two cards to save'}</button>
   </div>`;
 }
@@ -732,7 +722,7 @@ const splitCards=s=>(String(s||'').match(/[2-9TJQKA][shdc]/g)||[]);
 function encodeHand(h,cur){
   const e=h.events.map(ev=>ev.t==='board'?ev.cards.join(''):`${ev.p} ${ev.a}${ev.allin?'!':ev.to!=null?ev.to:''}`);
   const sh={};for(const [k,v] of Object.entries(h.shown||{}))if(v&&v.length===2)sh[k]=v.join('');
-  return b64u(JSON.stringify({v:1,n:h.players,sb:h.sb,bb:h.bb,c:cur,hs:h.heroStack,vs:h.vStack,p:h.pos,e,hc:(h.heroCards||[]).join(''),sh,w:h.winners||[],t:h.at,...(normSd(h.straddle)?{sd:[normSd(h.straddle).type,...normSd(h.straddle).amts]}:{}),...(h.stacks&&Object.keys(h.stacks).length?{k:h.stacks}:{}),...(normAnte(h.ante)?{a:normAnte(h.ante)}:{}),...(normRake(h.rake)?{r:normRake(h.rake)}:{})}));
+  return b64u(JSON.stringify({v:1,n:h.players,sb:h.sb,bb:h.bb,c:cur,hs:h.heroStack,vs:h.vStack,p:h.pos,e,hc:(h.heroCards||[]).join(''),sh,w:h.winners||[],t:h.at,...(normSd(h.straddle)?{sd:[normSd(h.straddle).type,...normSd(h.straddle).amts]}:{}),...(h.stacks&&Object.keys(h.stacks).length?{k:h.stacks}:{}),...(normAnte(h.ante)?{a:normAnte(h.ante)}:{}),...(cleanNote(h.note)?{nt:cleanNote(h.note)}:{})}));
 }
 function decodeHand(str){
   const o=JSON.parse(unb64u(str));
@@ -747,12 +737,12 @@ function decodeHand(str){
   const shown={};for(const [k,v] of Object.entries(o.sh||{}))if(pre.includes(k))shown[k]=splitCards(v).slice(0,2);
   const h={id:'h'+uid36(),n:0,at:+o.t||Date.now(),players:n,sb:r2(+o.sb),bb:r2(+o.bb),heroStack:r2(+o.hs),vStack:r2(+o.vs),pos:o.p,events,
     heroCards:splitCards(o.hc).slice(0,2),shown,winners:(o.w||[]).filter(p=>pre.includes(p)),
-    straddle:Array.isArray(o.sd)?(STR[o.sd[0]]?normSd({type:o.sd[0],amts:o.sd.slice(1)}):normSd({pos:o.sd[0],amt:o.sd[1]})):null,stacks:cleanStacks(o.k,pre),ante:normAnte(o.a),rake:normRake(o.r)};
+    straddle:Array.isArray(o.sd)?(STR[o.sd[0]]?normSd({type:o.sd[0],amts:o.sd.slice(1)}):normSd({pos:o.sd[0],amt:o.sd[1]})):null,stacks:cleanStacks(o.k,pre),ante:normAnte(o.a),note:cleanNote(o.nt)};
   if(!(h.sb>0&&h.bb>0&&h.heroStack>0&&h.vStack>0))throw new Error('stakes');
   replay(h);
   return {h,cur:CUR[o.c]?o.c:'GBP'};
 }
-function readable(h,cur,unit){
+function readable(h,cur,unit,withNote){
   const r=resolve(h),st=r.st,bb=h.bb;
   const A=x=>unit==='bb'?bbs(x,bb)+'bb':money(x,cur);
   const nm=p=>p===h.pos?'Hero':p;
@@ -784,15 +774,17 @@ function readable(h,cur,unit){
   if(k>1)parts[0]=[`${k} folds`,...pf.slice(k)];
   for(let i=0;i<4;i++)if(heads[i])L.push(`${heads[i]}${parts[i].length?': '+parts[i].join(', '):''}`);
   if(r.live.length>1){L.push('Showdown: '+r.live.map(p=>{const c=r.cardsOf(p);return `${nm(p)} ${c.length===2?'shows '+cs(c)+(r.val[p]?` (${describe(r.val[p])})`:''):'mucks'}`;}).join(', '));}
-  if(st.done!=='herofold')L.push(Object.entries(r.col).map(([p,a])=>`${nm(p)} wins ${A(a)}`).join(', ')+(r.rake>0?` (rake ${A(r.rake)})`:''));
+  if(st.done!=='herofold')L.push(Object.entries(r.col).map(([p,a])=>`${nm(p)} wins ${A(a)}`).join(', '));
   L.push(`Result for Hero: ${signed(r.net,unit==='bb'?Math.abs(bbs(r.net,bb))+'bb':money(Math.abs(r.net),cur))}`);
+  if(withNote&&cleanNote(h.note))L.push('Note: '+cleanNote(h.note));
   return L.join('\n');
 }
 const canLink=()=>/^https?:$/.test(location.protocol);
 function shareBits(){
   const h=DATA.hands[ui.detail],s=DATA.sessions[h.sid];
-  const text=readable(h,s.cur,ui.unit);
-  const link=canLink()&&ui.withLink!==false?location.origin+location.pathname+'#h='+encodeHand(h,s.cur):'';
+  const withNote=!!(ui.shareNote&&cleanNote(h.note));
+  const text=readable(h,s.cur,ui.unit,withNote);
+  const link=canLink()&&ui.withLink!==false?location.origin+location.pathname+'#h='+encodeHand(withNote?h:{...h,note:''},s.cur):'';
   return {text,link};
 }
 function unitSeg(){return `<div class="seg" role="group" aria-label="Show amounts in"><button class="${ui.unit==='bb'?'on':''}" data-a="unit" data-u="bb">Big blinds</button><button class="${ui.unit==='cash'?'on':''}" data-a="unit" data-u="cash">Cash</button></div>`;}
@@ -801,6 +793,7 @@ function vShare(){
   return `<div class="top"><button class="ib" data-a="backDetail" aria-label="Back">←</button><div class="grow"><h2>Share hand #${h.n}</h2><div class="sub">Send it to a friend or coach for review.</div></div></div>
   <div class="grp"><span class="lbl" style="flex:1">Amounts in</span>${unitSeg()}</div>
   ${canLink()?`<div class="grp"><span class="lbl" style="flex:1">Send</span><div class="seg" role="group" aria-label="What to send"><button class="${ui.withLink!==false?'on':''}" data-a="withLink" data-v="1">Text + replay link</button><button class="${ui.withLink===false?'on':''}" data-a="withLink" data-v="0">Text only</button></div></div>`:''}
+  ${cleanNote(h.note)?`<div class="grp"><span class="lbl" style="flex:1">Your note</span><div class="seg" role="group" aria-label="Include your note"><button class="${ui.shareNote?'on':''}" data-a="shareNote" data-v="1">Include</button><button class="${!ui.shareNote?'on':''}" data-a="shareNote" data-v="0">Leave out</button></div></div>`:''}
   <pre class="hh" id="hhText" style="white-space:pre-wrap">${esc(link?text+'\n\nStep through it: '+link:text)}</pre>
   <div class="row">${navigator.share?`<button class="btn primary" data-a="shareNative">Share…</button>`:''}<button class="btn ${navigator.share?'ghost':'primary'}" data-a="copyText">Copy</button></div>
   <div class="note">${link?'The link opens a step-by-step replay of this hand in Live Hand Log, and they can save it to their own hands. The hand is stored inside the link itself, so nothing is uploaded.':canLink()?'Only the text log is sent.':'Links work when the app is opened from a web address (for example GitHub Pages). Opened as a local file, you can share the text.'}</div>`;
@@ -825,7 +818,7 @@ function vShared(){
   <div class="panel"><div class="grp"><span class="lbl" style="flex:1">Step ${ui.step} of ${n}</span></div><div class="lastact">${esc(last)}</div>
     <div class="steps"><button class="btn ghost" data-a="step" data-s="first" aria-label="Start">⏮</button><button class="btn ghost" data-a="step" data-s="-1" aria-label="Back one step">◀</button><button class="btn primary" data-a="step" data-s="1" aria-label="Next step">▶</button><button class="btn ghost" data-a="step" data-s="last" aria-label="End">⏭</button></div></div>
   <div class="grp"><span class="lbl" style="flex:1">Whole hand</span>${unitSeg()}</div>
-  <pre class="hh" style="white-space:pre-wrap">${esc(readable(h,cur,ui.unit))}</pre>
+  <pre class="hh" style="white-space:pre-wrap">${esc(readable(h,cur,ui.unit,true))}</pre>
   <button class="btn ghost" data-a="saveShared">Save to my hands</button>`;
 }
 function saveShared(){
@@ -857,13 +850,13 @@ function render(){
   else{ui.view='home';html=vHome();}
   app.innerHTML=html;
 }
-function go(v){ui.view=v;ui.confirm=null;render();window.scrollTo(0,0);}
+function go(v){ui.view=v;ui.confirm=null;ui.exportAsk=null;render();window.scrollTo(0,0);}
 function startHand(){
   const s=S(),hs=handsOf(s.id),last=hs[hs.length-1];
   const hero=s.heroStack>0?s.heroStack:s.stack;
   ui.hand={id:'h'+uid36(),sid:s.id,n:hs.length+1,at:Date.now(),players:s.players,sb:s.sb,bb:s.bb,cur:s.cur,
     heroStack:hero,vStack:Math.max(s.stack,1),pos:null,events:[],heroCards:[],shown:{},winners:[],stage:'pos',
-    straddle:straddleInfo(s.lastStraddle,s.players)?normSd(s.lastStraddle):null,stacks:{},ante:normAnte(s.ante),rake:normRake(s.rake),
+    straddle:straddleInfo(s.lastStraddle,s.players)?normSd(s.lastStraddle):null,stacks:{},ante:normAnte(s.ante),
     suggest:last&&last.players===s.players?nextPos(last.pos,s.players):null};
   ui.pad=null;ui.stackPad=null;ui.pick=null;ui.amt='';saveDraft();go('hand');
 }
@@ -882,8 +875,8 @@ function summarize0(h,r){
 function saveHand(){
   const h=ui.hand,s=S(),r=resolve(h);
   const out={id:h.id,sid:h.sid,n:h.n,at:h.at,players:h.players,sb:h.sb,bb:h.bb,heroStack:h.heroStack,vStack:h.vStack,pos:h.pos,
-    events:h.events,heroCards:h.heroCards,shown:h.shown,winners:h.winners,net:r.net,summary:summarize(h,r),
-    straddle:straddleInfo(h.straddle,h.players)?normSd(h.straddle):null,stacks:h.stacks||{},ante:normAnte(h.ante),rake:normRake(h.rake)};
+    events:h.events,heroCards:h.heroCards,shown:h.shown,winners:h.winners,net:r.net,summary:summarize(h,r),note:cleanNote(h.note),
+    straddle:straddleInfo(h.straddle,h.players)?normSd(h.straddle):null,stacks:h.stacks||{},ante:normAnte(h.ante)};
   putHand(out);
   s.heroStack=r2(h.heroStack+r.net);putSession(s);
   ui.hand=null;saveDraft();
@@ -897,7 +890,8 @@ function offerFile(name,text,type){
     setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1500);toast('Saved '+name);
   }catch(e){ui.exportText=text;ui.back=ui.view;go('text');}
 }
-function sessionText(sid){const s=DATA.sessions[sid];return handsOf(sid).map(h=>handText(h,s)).join('\n\n\n')+'\n';}
+function sessionText(sid,withNotes){const s=DATA.sessions[sid];return handsOf(sid).map(h=>handText(h,s,withNotes)).join('\n\n\n')+'\n';}
+const anyNotes=hs=>hs.some(h=>cleanNote(h.note));
 async function copy(text){try{await navigator.clipboard.writeText(text);toast('Copied');}catch(e){const el=document.getElementById('hhText');if(el){const r=document.createRange();r.selectNodeContents(el);const sel=getSelection();sel.removeAllRanges();sel.addRange(r);}toast('Selected · copy it from the menu');}}
 const fileSafe=s=>s.replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'-')||'session';
 
@@ -906,7 +900,7 @@ function act(a,d){
   if(a!=='discard'&&a!=='delHand'&&a!=='delSession')ui.confirm=null;
   switch(a){
     case 'home':return go('home');
-    case 'setup':ui.setupPlayers=9;go('setup');syncSetup();return;
+    case 'setup':ui.setupPlayers=8;go('setup');syncSetup();return;
     case 'setPlayers':{ui.setupPlayers=+d.n;const keep=[...document.querySelectorAll('#setupForm input,#setupForm select')].map(el=>[el.id,el.type==='checkbox'?el.checked:el.value]);
       render();for(const [id,v] of keep){const el=document.getElementById(id);if(!el)continue;if(el.type==='checkbox')el.checked=v;else if(el.tagName!=='SELECT'||[...el.options].some(o=>o.value===v))el.value=v;}syncSetup();return;}
     case 'open':ui.sid=d.id;return go('session');
@@ -916,13 +910,21 @@ function act(a,d){
     case 'resume':return go('hand');
     case 'leaveHand':return go('session');
     case 'detail':ui.detail=d.id;ui.back='session';return go('detail');
-    case 'copyHH':return copy(handText(DATA.hands[ui.detail],S()));
+    case 'copyHH':return copy(handText(DATA.hands[ui.detail],S(),true));
     case 'copyAll':return copy(ui.exportText);
     case 'delHand':{if(ui.confirm!=='delHand'){ui.confirm='delHand';return render();}const x=DATA.hands[ui.detail];x.deleted=true;putHand(x);toast(`Hand #${x.n} deleted`);return go('session');}
     case 'delSession':{if(ui.confirm!=='delSession'){ui.confirm='delSession';return render();}const s=S();s.deleted=true;putSession(s);if(ui.hand&&ui.hand.sid===s.id){ui.hand=null;saveDraft();}toast('Session deleted');return go('home');}
-    case 'export':{const s=S();if(!handsOf(s.id).length)return toast('No hands to export yet');ui.back='session';return offerFile(fileSafe(s.name)+'.txt',sessionText(s.id));}
-    case 'showText':{const s=S();ui.exportText=handsOf(s.id).length?sessionText(s.id):'No hands yet.';ui.back='session';return go('text');}
-    case 'exportAll':{const t=sessions().filter(s=>handsOf(s.id).length).map(s=>sessionText(s.id)).join('\n\n');if(!t)return toast('No hands to export yet');ui.back='home';return offerFile('live-hands.txt',t);}
+    case 'export':case 'showText':case 'exportAll':{
+      const hs=a==='exportAll'?sessions().flatMap(x=>handsOf(x.id)):handsOf(S().id);
+      if(!hs.length)return toast('No hands to export yet');
+      if(anyNotes(hs)){ui.exportAsk=a;return render();}
+      return act('doExport',{what:a,notes:'0'});}
+    case 'exportCancel':ui.exportAsk=null;return render();
+    case 'doExport':{const what=d.what,notes=d.notes==='1';ui.exportAsk=null;
+      if(what==='exportAll'){const t=sessions().filter(x=>handsOf(x.id).length).map(x=>sessionText(x.id,notes)).join('\n\n');ui.back='home';return offerFile('live-hands.txt',t);}
+      const s=S();ui.back='session';
+      if(what==='showText'){ui.exportText=sessionText(s.id,notes);return go('text');}
+      render();return offerFile(fileSafe(s.name)+'.txt',sessionText(s.id,notes));}
     case 'discard':{if(ui.confirm!=='discard'){ui.confirm='discard';render();setTimeout(()=>{if(ui.confirm==='discard'){ui.confirm=null;render();}},3000);return;}ui.hand=null;saveDraft();toast('Hand discarded');return go('session');}
     case 'editStack':ui.editStack=true;render();{const el=document.getElementById('heroStackIn');el&&el.focus();}return;
     case 'saveStack':{const v=parseFloat(document.getElementById('heroStackIn').value);if(v>0){h.heroStack=r2(v);const s=S();s.heroStack=h.heroStack;putSession(s);}ui.editStack=false;saveDraft();return render();}
@@ -973,13 +975,15 @@ function act(a,d){
     case 'unpickF':{const arr=d.g===h.pos?h.heroCards:h.shown[d.g];arr.splice(+d.i,1);ui.pick=d.g;h.winners=[];saveDraft();return render();}
     case 'winner':{const i=h.winners.indexOf(d.p);if(i>=0)h.winners.splice(i,1);else h.winners.push(d.p);saveDraft();return render();}
     case 'saveHand':return saveHand();
+    case 'saveNote':{const x=DATA.hands[ui.detail],el=document.getElementById('noteIn');x.note=cleanNote(el.value);putHand(x);const st=document.getElementById('noteState');if(st)st.textContent=x.note?'Saved':'Note removed';toast(x.note?'Note saved':'Note removed');return;}
+    case 'shareNote':ui.shareNote=d.v==='1';return render();
     case 'seatStack':ui.stackPad=ui.stackPad===d.p?null:d.p;ui.pad=null;ui.amt='';return render();
     case 'stackCancel':ui.stackPad=null;ui.amt='';return render();
     case 'stackReset':if(h.stacks)delete h.stacks[ui.stackPad];ui.stackPad=null;ui.amt='';saveDraft();return render();
     case 'stackOk':{const v=r2(parseFloat(ui.amt)||0);if(!(v>0))return;const p=ui.stackPad;
       if(p===h.pos){h.heroStack=v;const s=S();s.heroStack=v;putSession(s);}else{h.stacks=h.stacks||{};h.stacks[p]=v;}
       ui.stackPad=null;ui.amt='';saveDraft();toast(`${p===h.pos?'Your':p+'’s'} stack set to ${money(v,S().cur)}`);return render();}
-    case 'share':ui.detail=d.id;ui.back='session';return go('share');
+    case 'share':ui.detail=d.id;ui.back='session';ui.shareNote=false;return go('share');
     case 'backDetail':return go('detail');
     case 'unit':ui.unit=d.u;try{localStorage.setItem('hand-log.unit',d.u);}catch(e){}return render();
     case 'shareNative':{const {text,link}=shareBits();navigator.share({title:'Poker hand for review',text:link?text+'\n\nStep through it: '+link:text}).catch(()=>{});return;}
@@ -1009,17 +1013,16 @@ document.addEventListener('submit',e=>{
   if(stt){const k=STR[stt].btn?1:STR[stt].k,def=strDefaults(stt,bb);const amts=[];
     for(let i=0;i<k;i++){const raw=g('sStr'+i);const v=raw?parseFloat(raw):def[i];if(!(v>0))return fail('Enter each straddle as an amount, or leave it blank for the usual size.');amts.push(r2(v));}
     straddle=normSd({type:stt,amts});}
-  let rake=null;const rt=g('sRakeType');
-  if(rt==='pct'){rake=normRake({type:'pct',pct:num('sRakePct'),cap:g('sRakeCap')?num('sRakeCap'):0,nfnd:document.getElementById('sNfnd').checked});if(!rake)return fail('Enter the rake percentage, for example 5.');}
-  if(rt==='fixed'){rake=normRake({type:'fixed',fixed:num('sRakeFixed'),nfnd:document.getElementById('sNfnd').checked});if(!rake)return fail('Enter the rake taken per hand.');}
   const s={id:'s'+uid36(),name:g('sName')||'Live '+new Date().toLocaleDateString(undefined,{month:'short',day:'numeric'}),sb:r2(sb),bb:r2(bb),cur:g('sCur'),players:ui.setupPlayers,
-    heroStack:r2(hero),stack:r2(stack),heroName:(g('sName2')||'Hero').replace(/[:\[\]<>]/g,'')||'Hero',createdAt:Date.now(),ante,rake,lastStraddle:straddle};
+    heroStack:r2(hero),stack:r2(stack),heroName:(g('sName2')||'Hero').replace(/[:\[\]<>]/g,'')||'Hero',createdAt:Date.now(),ante,lastStraddle:straddle};
   putSession(s);ui.sid=s.id;askPersist();startHand();
 });
-document.addEventListener('change',e=>{if(['sAnteType','sStrType','sRakeType'].includes(e.target.id))syncSetup();});
+document.addEventListener('change',e=>{if(['sAnteType','sStrType'].includes(e.target.id))syncSetup();});
 document.addEventListener('input',e=>{if(e.target.closest&&e.target.closest('#setupForm')){const er=document.getElementById('setupErr');if(er)er.hidden=true;}});
 document.addEventListener('input',e=>{
+  if(e.target.id==='noteIn'){const st=document.getElementById('noteState');if(st)st.textContent='Not saved yet';return;}
   const h=ui.hand;if(!h||ui.view!=='hand')return;
+  if(e.target.id==='handNote'){h.note=e.target.value.slice(0,500);saveDraft();return;}
   if(e.target.id==='heroStackIn'){const v=r2(parseFloat(e.target.value));const lab=document.getElementById('heroStackBb');
     if(v>0){h.heroStack=v;saveDraft();if(lab)lab.textContent=bbs(v,h.bb)+' bb';}else if(lab)lab.textContent='– bb';}
   if(e.target.classList.contains('stramt')&&h.straddle){const i=+e.target.dataset.i,v=r2(parseFloat(e.target.value));const lab=document.getElementById('strBb'+i);
@@ -1076,7 +1079,7 @@ document.addEventListener('change',async e=>{
         players:Math.min(10,Math.max(2,Math.round(+v.players)||9)),heroStack:num(v.heroStack,200),stack:num(v.stack,200),
         heroName:String(v.heroName||'Hero').replace(/[:\[\]<>]/g,'').slice(0,30)||'Hero',createdAt:num(v.createdAt,Date.now()),
         updatedAt:num(v.updatedAt,0),deleted:!!v.deleted,shared:!!v.shared,
-        lastStraddle:normSd(v.lastStraddle),ante:normAnte(v.ante),rake:normRake(v.rake)};}
+        lastStraddle:normSd(v.lastStraddle),ante:normAnte(v.ante)};}
     for(const v of Object.values(d.hands||{})){
       try{if(!v||!okId(v.id)||!okId(v.sid))continue;
         const players=Math.min(10,Math.max(2,Math.round(+v.players)||9)),pre=positions(players).pre;
@@ -1089,7 +1092,7 @@ document.addEventListener('change',async e=>{
         const h={id:v.id,sid:v.sid,n:Math.max(1,Math.round(+v.n)||1),at:num(v.at,Date.now()),players,sb:num(v.sb,1),bb:num(v.bb,2),
           heroStack:num(v.heroStack,200),vStack:num(v.vStack,200),pos:v.pos,events,heroCards:cards(v.heroCards),shown,
           winners:(v.winners||[]).filter(p=>pre.includes(p)),updatedAt:num(v.updatedAt,0),deleted:!!v.deleted,
-          straddle:straddleInfo(v.straddle,players)?normSd(v.straddle):null,stacks:cleanStacks(v.stacks,pre),ante:normAnte(v.ante),rake:normRake(v.rake)};
+          straddle:straddleInfo(v.straddle,players)?normSd(v.straddle):null,stacks:cleanStacks(v.stacks,pre),ante:normAnte(v.ante),note:cleanNote(v.note)};
         const r=resolve(h);h.net=r.net;h.summary=summarize(h,r);hands[h.id]=h;
       }catch(err){}
     }

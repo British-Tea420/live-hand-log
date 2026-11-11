@@ -6,7 +6,7 @@ Everything runs in your browser. There is no account and no server, and your han
 
 ## Features
 
-- **Set up once per session.** Enter blinds, currency, table size, stacks, ante (everyone or big blind ante), a standing straddle and the rake structure (percentage with cap, or fixed per hand, with optional no flop no drop) one time. Every hand after that starts with one question: your position.
+- **Set up once per session.** Enter blinds, currency, table size, stacks, ante (everyone or big blind ante) and a standing straddle one time. Every hand after that starts with one question: your position.
 - **Only legal actions.** Each player's turn shows only the moves they can make: Fold / Call / Raise when facing a bet, Check / Bet when not.
 - **Legal bets only.** Bets and raises below the minimum (or more than a player's stack) are refused, and an all-in for less than a full raise doesn't reopen the betting.
 - **Real cash amounts.** Type what was actually bet. It's converted to big blinds as you type, and calls fill in automatically.
@@ -15,7 +15,8 @@ Everything runs in your browser. There is no account and no server, and your han
 - **Stacks.** Your stack is editable at the start of every hand (it also carries over automatically). Tap any player's seat during a hand to enter their stack, for example a short stack about to shove, so all-ins and uncalled bets come out right.
 - **Board and showdown.** You're asked for the flop, turn and river as each betting round closes. At the end you enter your cards and, optionally, your opponents' cards. The winner is worked out for you, side pots included.
 - **Undo** any step. A half-entered hand survives closing the page.
-- **Export** a session (or everything) as a `.txt` hand history file.
+- **Notes.** Tag any hand with a written note, such as "CO is known to overbluff", when you save it or later from the hand's page.
+- **Export** a session (or everything) as a `.txt` hand history file, with or without your notes. Notes are written as a chat line from you, which trackers keep without affecting stats.
 - **Share a hand for review.** Send a plain-text summary in big blinds or cash, on its own or with a link that opens a step-by-step replay. The person you send it to can save the hand into their own log. The whole hand is encoded inside the link, so nothing is uploaded.
 - **Works offline** after the first visit. Install it to your home screen like an app.
 - **Backup and restore** all your data as a `.json` file.
@@ -61,6 +62,7 @@ Hands are stored in your browser's local storage on the device you use. They are
 
 ## Not supported yet
 
+- Rake (exported as 0)
 - Straddles are exported as `posts straddle`. If your tracker rejects those hands, please open an issue.
 - Games other than No-Limit Hold'em
 - If you fold with several opponents still in, the pot is given to the last player who bet or raised. Your own result is still correct.
