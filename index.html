@@ -213,16 +213,30 @@ function straddleInfo(sd,n){
   const who=pre.slice(0,t.k);
   return {type:sd.type,label:t.label,posts:who.map((p,i)=>[p,sd.amts[i]]),order:[...pre.slice(t.k),...who]};
 }
+// Antes: 'all' = every player posts, 'bb' = big blind posts one ante for the table. Antes are dead money.
+function normAnte(a){if(!a||typeof a!=='object'||!['all','bb'].includes(a.type))return null;const amt=r2(+a.amt);return amt>0?{type:a.type,amt}:null;}
+// Rake: percentage of the pot with an optional cap, or a fixed amount per hand; optional "no flop, no drop".
+function normRake(r){
+  if(!r||typeof r!=='object'||!['pct','fixed'].includes(r.type))return null;
+  const o={type:r.type,nfnd:!!r.nfnd};
+  if(r.type==='pct'){o.pct=Math.min(25,Math.max(0,+r.pct||0));o.cap=Math.max(0,r2(+r.cap||0));if(!(o.pct>0))return null;}
+  else{o.fixed=Math.max(0,r2(+r.fixed||0));if(!(o.fixed>0))return null;}
+  return o;
+}
+function anteLabel(a,m){a=normAnte(a);return a?(a.type==='bb'?`BB ante ${m(a.amt)}`:`${m(a.amt)} ante each`):'';}
+function rakeLabel(r,m){r=normRake(r);if(!r)return 'No rake';return (r.type==='pct'?`${r.pct}% rake${r.cap?`, ${m(r.cap)} cap`:''}`:`${m(r.fixed)} rake per hand`)+(r.nfnd?', no flop no drop':'');}
 function preOrder(h){const i=straddleInfo(h.straddle,h.players);return i?i.order:positions(h.players).pre;}
-function strLabel(h,m){const i=straddleInfo(h.straddle,h.players);return i?` · ${i.label} ${i.posts.map(x=>m(x[1])).join('/')}`:'';}
+function strLabel(h,m){const i=straddleInfo(h.straddle,h.players),a=anteLabel(h.ante,m);return (a?' · '+a:'')+(i?` · ${i.label} ${i.posts.map(x=>m(x[1])).join('/')}`:'');}
 function replay(h){
   const {pre,post}=positions(h.players),pre0=preOrder(h);
   const P={};
-  for(const p of pre){const s=p===h.pos?h.heroStack:((h.stacks&&h.stacks[p])||h.vStack);P[p]={start:s,stack:s,in:0,tot:0,folded:false,allin:false,acted:false,foldSt:null};}
+  for(const p of pre){const s=p===h.pos?h.heroStack:((h.stacks&&h.stacks[p])||h.vStack);P[p]={start:s,stack:s,in:0,tot:0,ante:0,folded:false,allin:false,acted:false,mayRaise:true,foldSt:null};}
   const st={P,pre,post,preOrder:pre0,street:0,curBet:0,minRaise:h.bb,board:[],log:[],lastIdx:-1,lastAgg:null,done:null,toAct:null,needBoard:0};
-  const put=(p,a)=>{const x=P[p];a=r2(Math.max(0,a));if(a>x.stack){x.start=r2(x.start+a-x.stack);x.stack=a;}
-    x.stack=r2(x.stack-a);x.in=r2(x.in+a);x.tot=r2(x.tot+a);if(x.stack<=0){x.stack=0;x.allin=true;}return a;};
+  const put=(p,a,dead)=>{const x=P[p];a=r2(Math.max(0,a));if(a>x.stack){x.start=r2(x.start+a-x.stack);x.stack=a;}
+    x.stack=r2(x.stack-a);if(dead)x.ante=r2(x.ante+a);else x.in=r2(x.in+a);x.tot=r2(x.tot+a);if(x.stack<=0){x.stack=0;x.allin=true;}return a;};
   const sbp=h.players===2?'BTN':'SB';
+  const an=normAnte(h.ante);st.antes=[];
+  if(an){for(const p of (an.type==='bb'?['BB']:positions(h.players).seats))st.antes.push([p,put(p,an.amt,true)]);}
   put(sbp,h.sb);put('BB',h.bb);
   st.blinds=[[sbp,P[sbp].in],['BB',P.BB.in]];
   const sd=straddleInfo(h.straddle,h.players);st.straddles=[];
@@ -230,11 +244,11 @@ function replay(h){
   st.ula=!!(sd&&sd.ula);st.ulaUsed=false;
   st.curBet=Math.max(...pre.map(p=>P[p].in));
   if(sd&&st.curBet>h.bb)st.minRaise=st.curBet;
-  st.posted=r2(pre.reduce((a,p)=>a+P[p].in,0));
+  st.posted=r2(pre.reduce((a,p)=>a+P[p].tot,0));
   for(const ev of h.events){
     if(ev.t==='board'){
       st.street++;st.board.push(...ev.cards);st.log.push({k:'board',street:st.street,cards:ev.cards});
-      for(const p of pre){P[p].in=0;P[p].acted=false;}
+      for(const p of pre){P[p].in=0;P[p].acted=false;P[p].mayRaise=true;}
       st.curBet=0;st.minRaise=h.bb;st.lastIdx=-1;continue;
     }
     const x=P[ev.p],order=st.street?post:pre0;st.lastIdx=order.indexOf(ev.p);
@@ -244,7 +258,12 @@ function replay(h){
     else if(ev.a==='b'||ev.a==='r'){
       const prev=st.curBet;const target=ev.allin?r2(x.in+x.stack):ev.to;
       L.amt=put(ev.p,target-x.in);L.to=x.in;L.allin=x.allin;L.prev=prev;L.a=prev===0?'b':'r';
-      if(x.in>prev){if(x.in-prev>=st.minRaise)st.minRaise=r2(x.in-prev);st.curBet=x.in;st.lastAgg=ev.p;for(const p of pre)if(p!==ev.p)P[p].acted=false;}
+      if(x.in>prev){
+        const inc=r2(x.in-prev);
+        if(inc>=st.minRaise){st.minRaise=inc;for(const p of pre)if(p!==ev.p){P[p].acted=false;P[p].mayRaise=true;}}
+        // An all-in for less than a full raise doesn't reopen the betting: players who already acted may only call or fold.
+        else for(const p of pre)if(p!==ev.p&&P[p].acted)P[p].mayRaise=false;
+        st.curBet=x.in;st.lastAgg=ev.p;}
       else if(x.in<prev){L.a='c';}
     }
     if(st.street===0&&ev.p==='BTN')st.ulaUsed=true;
@@ -272,12 +291,15 @@ function nextActor(st){
   if(ula){const x=P.BTN;if(x&&!x.folded&&!x.allin&&(!x.acted||x.in<st.curBet))return 'BTN';}
   return null;
 }
+// Legal bet/raise-to range for player p: at least a full bet/raise, at most all-in.
+function limits(st,p,bb){const x=st.P[p],max=r2(x.in+x.stack);const min=st.curBet===0?bb:r2(st.curBet+st.minRaise);return {min,max,allinOnly:min>=max};}
 function options(st,p){
   const x=st.P[p],toCall=r2(st.curBet-x.in);
   const others=st.pre.filter(q=>q!==p&&!st.P[q].folded&&!st.P[q].allin).length;
   const o=[];
-  if(toCall>0){o.push('f','c');if(x.stack>toCall&&others>0)o.push('r');}
-  else{o.push('x');if(others>0)o.push(st.curBet===0?'b':'r');}
+  const may=x.mayRaise!==false;
+  if(toCall>0){o.push('f','c');if(x.stack>toCall&&others>0&&may)o.push('r');}
+  else{o.push('x');if(others>0&&may)o.push(st.curBet===0?'b':'r');}
   return {o,toCall:Math.min(toCall,x.stack),stack:x.stack,inn:x.in};
 }
 
@@ -338,10 +360,13 @@ function resolve(h){
     for(const p of live)if(p!==w){P[p].folded=true;P[p].foldSt=st.street;st.log.push({k:'act',street:st.street,p,a:'f',synthetic:true});}
     live=[w];
   }
-  const tots=st.pre.map(p=>[p,P[p].tot]).sort((a,b)=>b[1]-a[1]);
+  // Antes are dead money: they go to the main pot and are never part of an uncalled bet.
+  const bet={};st.pre.forEach(p=>bet[p]=r2(P[p].tot-P[p].ante));
+  const tots=st.pre.map(p=>[p,bet[p]]).sort((a,b)=>b[1]-a[1]);
   let refund=null;if(tots[0][1]>tots[1][1])refund={p:tots[0][0],amt:r2(tots[0][1]-tots[1][1])};
-  const c={};st.pre.forEach(p=>c[p]=P[p].tot);if(refund)c[refund.p]=r2(c[refund.p]-refund.amt);
-  const total=r2(st.pre.reduce((a,p)=>a+c[p],0));
+  const c={};st.pre.forEach(p=>c[p]=bet[p]);if(refund)c[refund.p]=r2(c[refund.p]-refund.amt);
+  const antes=r2(st.pre.reduce((a,p)=>a+P[p].ante,0));
+  const betTotal=r2(st.pre.reduce((a,p)=>a+c[p],0)),total=r2(betTotal+antes);
   const levels=[...new Set(live.map(p=>c[p]))].sort((a,b)=>a-b);
   const pots=[];let prev=0;
   for(const L of levels){
@@ -351,8 +376,16 @@ function resolve(h){
     prev=L;
   }
   const sumP=r2(pots.reduce((a,b)=>a+b.amt,0));
-  if(pots.length&&total>sumP)pots[pots.length-1].amt=r2(pots[pots.length-1].amt+total-sumP);
-  if(!pots.length)pots.push({amt:total,el:live});
+  if(pots.length&&betTotal>sumP)pots[pots.length-1].amt=r2(pots[pots.length-1].amt+betTotal-sumP);
+  if(!pots.length)pots.push({amt:0,el:live});
+  pots[0].amt=r2(pots[0].amt+antes);
+  // Rake comes off the pot before it is paid out, main pot first.
+  const rk=normRake(h.rake);let rake=0;
+  if(rk&&!(rk.nfnd&&st.board.length===0)){
+    if(rk.type==='pct'){rake=Math.floor(Math.round(total*100)*rk.pct/100)/100;if(rk.cap>0)rake=Math.min(rake,rk.cap);}
+    else rake=Math.min(rk.fixed,total);
+  }
+  rake=r2(rake);{let left=rake;for(const pot of pots){const t=Math.min(left,pot.amt);pot.amt=r2(pot.amt-t);left=r2(left-t);}}
   const cardsOf=p=>p===h.pos?(h.heroCards||[]):((h.shown||{})[p]||[]);
   const val={};
   if(st.board.length===5)for(const p of live)if(cardsOf(p).length===2)val[p]=best([...cardsOf(p),...st.board]);
@@ -367,7 +400,7 @@ function resolve(h){
   }
   const hero=h.pos;
   const net=r2((col[hero]||0)+(refund&&refund.p===hero?refund.amt:0)-P[hero].tot);
-  return {st,refund,pots,col,val,total,live,net,cardsOf};
+  return {st,refund,pots,col,val,total,rake,live,net,cardsOf};
 }
 function canAutoWinner(h,st){
   const live=st.pre.filter(p=>!st.P[p].folded);
@@ -393,6 +426,7 @@ function handText(h,sess){
   L.push(`PokerStars Hand #${h.at}:  Hold'em No Limit (${m(h.sb)}/${m(h.bb)} ${code}) - ${etStamp(h.at)}`);
   L.push(`Table '${tname}' ${h.players}-max Seat #${seatNo('BTN')} is the button`);
   for(const p of seats)L.push(`Seat ${seatNo(p)}: ${name(p)} (${m(P[p].start)} in chips)`);
+  for(const [ap,a] of st.antes)L.push(`${name(ap)}: posts the ante ${m(a)}`);
   L.push(`${name(st.blinds[0][0])}: posts small blind ${m(st.blinds[0][1])}`);
   L.push(`${name('BB')}: posts big blind ${m(st.blinds[1][1])}`);
   for(const [sp,a] of st.straddles)L.push(`${name(sp)}: posts straddle ${m(a)}`);
@@ -427,7 +461,7 @@ function handText(h,sess){
   });
   if(!sd&&live.length===1)L.push(`${name(live[0])}: doesn't show hand`);
   L.push('*** SUMMARY ***');
-  const potStr=pots.length>1?`Total pot ${m(res.total)} Main pot ${m(pots[0].amt)}. ${pots.slice(1).map((p,i)=>`Side pot-${i+1} ${m(p.amt)}.`).join(' ')} | Rake ${m(0)}`:`Total pot ${m(res.total)} | Rake ${m(0)}`;
+  const potStr=pots.length>1?`Total pot ${m(res.total)} Main pot ${m(pots[0].amt)}. ${pots.slice(1).map((p,i)=>`Side pot-${i+1} ${m(p.amt)}.`).join(' ')} | Rake ${m(res.rake)}`:`Total pot ${m(res.total)} | Rake ${m(res.rake)}`;
   L.push(potStr);
   if(st.board.length)L.push(`Board [${st.board.join(' ')}]`);
   const STN=['before Flop','on the Flop','on the Turn','on the River'];
@@ -437,7 +471,7 @@ function handText(h,sess){
     if(p===st.blinds[0][0])tag+=' (small blind)';
     if(p==='BB')tag+=' (big blind)';
     let d;
-    if(x.folded){d=`folded ${STN[x.foldSt]}`;if(x.foldSt===0&&x.tot<=0)d+=" (didn't bet)";}
+    if(x.folded){d=`folded ${STN[x.foldSt]}`;if(x.foldSt===0&&x.tot-x.ante<=0)d+=" (didn't bet)";}
     else if(!sd)d=`collected (${m(col[p]||0)})`;
     else{const cs=res.cardsOf(p);
       if(cs.length===2&&val[p])d=winners.has(p)?`showed [${cs.join(' ')}] and won (${m(col[p])}) with ${describe(val[p])}`:`showed [${cs.join(' ')}] and lost with ${describe(val[p])}`;
@@ -486,28 +520,51 @@ function vHome(){
   <input type="file" id="restoreFile" accept=".json,application/json" hidden>`;
 }
 function vSetup(){
-  const n=ui.setupPlayers;
+  const n=ui.setupPlayers,types=strTypes(n);
   return `<div class="top"><button class="ib" data-a="home" aria-label="Back">←</button><div class="grow"><h2>New session</h2></div></div>
-  <form class="panel" id="setupForm">
-    <div class="field"><label class="lbl" for="sName">Table or card room</label><input id="sName" value="Live ${new Date().toLocaleDateString(undefined,{month:'short',day:'numeric'})}" autocomplete="off"></div>
+  <form class="panel" id="setupForm" novalidate>
+    <div class="field"><label class="lbl" for="sName">Table or card room</label><input id="sName" placeholder="e.g. Friday game" autocomplete="off"></div>
     <div class="row">
-      <div class="field"><label class="lbl" for="sSb">Small blind</label><input id="sSb" inputmode="decimal" value="1"></div>
-      <div class="field"><label class="lbl" for="sBb">Big blind</label><input id="sBb" inputmode="decimal" value="2"></div>
+      <div class="field"><label class="lbl" for="sSb">Small blind</label><input id="sSb" inputmode="decimal" placeholder="e.g. 1" autocomplete="off"></div>
+      <div class="field"><label class="lbl" for="sBb">Big blind</label><input id="sBb" inputmode="decimal" placeholder="e.g. 2" autocomplete="off"></div>
       <div class="field"><label class="lbl" for="sCur">Currency</label><select id="sCur">${Object.keys(CUR).map(c=>`<option>${c}</option>`).join('')}</select></div>
     </div>
     <div class="field"><span class="lbl">Players at the table</span><div class="chips">${[2,3,4,5,6,7,8,9,10].map(k=>`<button type="button" class="chip ${k===n?'on':''}" data-a="setPlayers" data-n="${k}">${k}</button>`).join('')}</div></div>
     <div class="row">
-      <div class="field"><label class="lbl" for="sHero">Your buy-in</label><input id="sHero" inputmode="decimal" value="200"></div>
-      <div class="field"><label class="lbl" for="sStack">Typical villain stack</label><input id="sStack" inputmode="decimal" value="200"></div>
+      <div class="field"><label class="lbl" for="sHero">Your buy-in</label><input id="sHero" inputmode="decimal" placeholder="e.g. 200" autocomplete="off"></div>
+      <div class="field"><label class="lbl" for="sStack">Typical villain stack</label><input id="sStack" inputmode="decimal" placeholder="Same as yours" autocomplete="off"></div>
     </div>
-    <div class="field"><label class="lbl" for="sName2">Your screen name in exports</label><input id="sName2" value="Hero" autocomplete="off"></div>
+    <div class="lbl" style="margin-top:6px">Game type</div>
+    <div class="row">
+      <div class="field"><label class="lbl" for="sAnteType">Ante</label><select id="sAnteType"><option value="">No ante</option><option value="all">Everyone antes</option><option value="bb">Big blind ante</option></select></div>
+      <div class="field" id="gAnte" hidden><label class="lbl" for="sAnteAmt">Ante amount</label><input id="sAnteAmt" inputmode="decimal" placeholder="e.g. 1" autocomplete="off"></div>
+    </div>
+    ${types.length?`<div class="field"><label class="lbl" for="sStrType">Straddle (every hand)</label><select id="sStrType"><option value="">No straddle</option>${types.map(t=>`<option value="${t}">${STR[t].label}</option>`).join('')}</select></div>
+    <div class="row" id="gStr" hidden>${[0,1,2].map(i=>`<div class="field" id="gStr${i}"><label class="lbl" for="sStr${i}">${['1st','2nd','3rd'][i]} straddle</label><input id="sStr${i}" inputmode="decimal" placeholder="${[2,4,8][i]}× big blind" autocomplete="off"></div>`).join('')}</div>`:''}
+    <div class="field"><label class="lbl" for="sRakeType">Rake</label><select id="sRakeType"><option value="">No rake (time charge)</option><option value="pct">Percentage of the pot</option><option value="fixed">Fixed amount per hand</option></select></div>
+    <div class="row" id="gRakePct" hidden>
+      <div class="field"><label class="lbl" for="sRakePct">Rake %</label><input id="sRakePct" inputmode="decimal" placeholder="e.g. 5" autocomplete="off"></div>
+      <div class="field"><label class="lbl" for="sRakeCap">Cap per hand</label><input id="sRakeCap" inputmode="decimal" placeholder="No cap" autocomplete="off"></div>
+    </div>
+    <div class="field" id="gRakeFixed" hidden><label class="lbl" for="sRakeFixed">Rake per hand</label><input id="sRakeFixed" inputmode="decimal" placeholder="e.g. 2" autocomplete="off"></div>
+    <label class="grp" id="gNfnd" hidden style="gap:10px;flex-wrap:nowrap;align-items:flex-start"><input type="checkbox" id="sNfnd" checked style="width:20px;height:20px;flex:0 0 auto;margin:0"> <span style="flex:1;min-width:0">No flop, no drop (no rake if the hand ends before the flop)</span></label>
+    <div class="field"><label class="lbl" for="sName2">Your screen name in exports</label><input id="sName2" placeholder="Hero" autocomplete="off"></div>
     <div id="setupErr" class="warnmsg" hidden></div>
     <button class="btn primary" type="submit">Start session</button>
   </form>`;
 }
+// Show only the inputs that the chosen ante, straddle and rake options need.
+function syncSetup(){
+  const v=id=>{const el=document.getElementById(id);return el?el.value:'';},show=(id,on)=>{const el=document.getElementById(id);if(el)el.hidden=!on;};
+  show('gAnte',!!v('sAnteType'));
+  const t=v('sStrType'),k=t?(STR[t].btn?1:STR[t].k):0;show('gStr',k>0);[0,1,2].forEach(i=>show('gStr'+i,i<k));
+  if(t&&STR[t].btn){const l=document.querySelector('label[for="sStr0"]');if(l)l.textContent='Button straddle';}
+  else{const l=document.querySelector('label[for="sStr0"]');if(l)l.textContent='1st straddle';}
+  const r=v('sRakeType');show('gRakePct',r==='pct');show('gRakeFixed',r==='fixed');show('gNfnd',!!r);
+}
 function vSession(){
   const s=S(),t=sessStats(s.id),hs=handsOf(s.id).slice().reverse(),draft=ui.hand&&ui.hand.sid===s.id;
-  return `<div class="top"><button class="ib" data-a="home" aria-label="Back">←</button><div class="grow"><h2>${esc(s.name)}</h2><div class="sub num">${money(s.sb,s.cur)}/${money(s.bb,s.cur)} ${s.cur} · your stack ${money(s.heroStack,s.cur)} (${bbs(s.heroStack,s.bb)} bb)</div></div></div>
+  return `<div class="top"><button class="ib" data-a="home" aria-label="Back">←</button><div class="grow"><h2>${esc(s.name)}</h2><div class="sub num">${money(s.sb,s.cur)}/${money(s.bb,s.cur)} ${s.cur}${s.ante?' · '+anteLabel(s.ante,x=>money(x,s.cur)):''} · ${rakeLabel(s.rake,x=>money(x,s.cur))} · your stack ${money(s.heroStack,s.cur)} (${bbs(s.heroStack,s.bb)} bb)</div></div></div>
   <div class="stats num">
     <div class="stat"><span class="lbl">Hands</span><b>${t.n}</b></div>
     <div class="stat"><span class="lbl">Won</span><b class="${t.net>0?'pos':t.net<0?'neg':''}">${signed(t.net,money(Math.abs(t.net),s.cur))}</b></div>
@@ -595,15 +652,18 @@ function vAction(h,st,m){
   const who=isHero?`<em>You</em> (${p})`:`<em>${p}</em>`;
   const facing=o.toCall>0?`facing ${m(o.toCall)} · ${bbs(o.toCall,bb)} bb`:st.curBet>0?'option':'no bet yet';
   if(ui.pad&&ui.pad.p===p){
-    const a=ui.pad.a,v=parseFloat(ui.amt)||0,min=a==='b'?bb:r2(st.curBet+st.minRaise),max=r2(o.stack+o.inn);
-    const bad=v>0&&(a==='r'?v<=st.curBet:false);
+    const a=ui.pad.a,v=r2(parseFloat(ui.amt)||0),{min,max,allinOnly}=limits(st,p,bb);
+    const legal=v>0&&(v===max||(v>=min&&v<max));
+    const verb=a==='b'?'bet':'raise';
+    const bad=!v||legal?'':v>max?`${isHero?'You only have':p+' only has'} ${m(max)}. Use All-in, or ${isHero?'tap your seat':'tap their seat'} to change the stack.`
+      :`Minimum ${verb} is ${a==='b'?'':'to '}${m(min)}${allinOnly?'':` (or all-in ${m(max)})`}.`;
     return `<div class="panel pad">
       <div class="grp"><div class="prompt" style="flex:1">${who} ${a==='b'?'bets':'raises to'}</div><button class="ib" data-a="padCancel">Cancel</button></div>
       <div class="amt num"><span class="big">${CUR[S().cur]||'£'}${ui.amt||'0'}</span><span class="bb">${bbs(v,bb)} bb</span></div>
-      <div class="muted num" style="font-size:13px">${a==='r'?`Total amount, not the raise size. Current bet ${m(st.curBet)} · min raise to ${m(min)}`:`Min bet ${m(min)}`} · stack ${m(max)}</div>
-      ${bad?`<div class="warnmsg">A raise must be more than the current bet of ${m(st.curBet)}.</div>`:''}
+      <div class="muted num" style="font-size:13px">${allinOnly?`Not enough chips for a full ${verb}: only all-in (${m(max)}) is allowed.`:`${a==='r'?`Total amount, not the raise size. Current bet ${m(st.curBet)} · `:''}min ${verb} ${a==='r'?'to ':''}${m(min)} · max ${m(max)} (all-in)`}</div>
+      ${bad?`<div class="warnmsg">${bad}</div>`:''}
       <div class="keys">${['1','2','3','4','5','6','7','8','9','.','0','⌫'].map(k=>`<button class="key" data-a="key" data-k="${k}">${k}</button>`).join('')}</div>
-      <div class="row"><button class="btn ghost" data-a="allin">All-in ${m(max)}</button><button class="btn primary" data-a="padOk" ${v>0&&!bad?'':'disabled'}>${a==='b'?'Bet':'Raise to'} ${m(v)}</button></div>
+      <div class="row"><button class="btn ghost" data-a="allin">All-in ${m(max)}</button><button class="btn primary" data-a="padOk" ${legal?'':'disabled'}>${v===max?'All-in':a==='b'?'Bet':'Raise to'} ${m(v)}</button></div>
     </div>`;
   }
   const lab={f:['Fold',''],x:['Check',''],c:['Call',`${m(o.toCall)} · ${bbs(o.toCall,bb)}bb${o.toCall>=o.stack?' all-in':''}`],b:['Bet','enter amount'],r:['Raise','enter amount']};
@@ -672,7 +732,7 @@ const splitCards=s=>(String(s||'').match(/[2-9TJQKA][shdc]/g)||[]);
 function encodeHand(h,cur){
   const e=h.events.map(ev=>ev.t==='board'?ev.cards.join(''):`${ev.p} ${ev.a}${ev.allin?'!':ev.to!=null?ev.to:''}`);
   const sh={};for(const [k,v] of Object.entries(h.shown||{}))if(v&&v.length===2)sh[k]=v.join('');
-  return b64u(JSON.stringify({v:1,n:h.players,sb:h.sb,bb:h.bb,c:cur,hs:h.heroStack,vs:h.vStack,p:h.pos,e,hc:(h.heroCards||[]).join(''),sh,w:h.winners||[],t:h.at,...(normSd(h.straddle)?{sd:[normSd(h.straddle).type,...normSd(h.straddle).amts]}:{}),...(h.stacks&&Object.keys(h.stacks).length?{k:h.stacks}:{})}));
+  return b64u(JSON.stringify({v:1,n:h.players,sb:h.sb,bb:h.bb,c:cur,hs:h.heroStack,vs:h.vStack,p:h.pos,e,hc:(h.heroCards||[]).join(''),sh,w:h.winners||[],t:h.at,...(normSd(h.straddle)?{sd:[normSd(h.straddle).type,...normSd(h.straddle).amts]}:{}),...(h.stacks&&Object.keys(h.stacks).length?{k:h.stacks}:{}),...(normAnte(h.ante)?{a:normAnte(h.ante)}:{}),...(normRake(h.rake)?{r:normRake(h.rake)}:{})}));
 }
 function decodeHand(str){
   const o=JSON.parse(unb64u(str));
@@ -687,7 +747,7 @@ function decodeHand(str){
   const shown={};for(const [k,v] of Object.entries(o.sh||{}))if(pre.includes(k))shown[k]=splitCards(v).slice(0,2);
   const h={id:'h'+uid36(),n:0,at:+o.t||Date.now(),players:n,sb:r2(+o.sb),bb:r2(+o.bb),heroStack:r2(+o.hs),vStack:r2(+o.vs),pos:o.p,events,
     heroCards:splitCards(o.hc).slice(0,2),shown,winners:(o.w||[]).filter(p=>pre.includes(p)),
-    straddle:Array.isArray(o.sd)?(STR[o.sd[0]]?normSd({type:o.sd[0],amts:o.sd.slice(1)}):normSd({pos:o.sd[0],amt:o.sd[1]})):null,stacks:cleanStacks(o.k,pre)};
+    straddle:Array.isArray(o.sd)?(STR[o.sd[0]]?normSd({type:o.sd[0],amts:o.sd.slice(1)}):normSd({pos:o.sd[0],amt:o.sd[1]})):null,stacks:cleanStacks(o.k,pre),ante:normAnte(o.a),rake:normRake(o.r)};
   if(!(h.sb>0&&h.bb>0&&h.heroStack>0&&h.vStack>0))throw new Error('stakes');
   replay(h);
   return {h,cur:CUR[o.c]?o.c:'GBP'};
@@ -701,12 +761,14 @@ function readable(h,cur,unit){
   const L=[];
   L.push(`NL Hold'em ${money(h.sb,cur)}/${money(h.bb,cur)} · ${h.players}-handed`);
   L.push(`Hero ${h.pos} · ${A(st.P[h.pos].start)} stack${h.heroCards&&h.heroCards.length===2?' · '+cs(h.heroCards):''}`);
+  if(st.antes.length)L.push(anteLabel(h.ante,A));
   for(const [sp,a] of st.straddles)L.push(`${nm(sp)} straddles ${A(a)}`);
   const short=Object.keys(h.stacks||{}).filter(p=>p!==h.pos&&st.pre.includes(p));
   if(short.length)L.push('Stacks: '+short.map(p=>`${p} ${A(st.P[p].start)}`).join(', ')+` · others ${A(h.vStack)}`);
   // pot shown at each street leaves out any bet nobody could call
   const tot={};st.pre.forEach(p=>tot[p]=0);st.blinds.forEach(([p,a])=>tot[p]+=a);for(const [sp,a] of st.straddles)tot[sp]+=a;
-  const potNow=()=>{const v=Object.values(tot).sort((a,b)=>b-a);return r2(v.reduce((a,b)=>a+b,0)-(v[0]-v[1]));};
+  const dead=st.antes.reduce((a,x)=>a+x[1],0);
+  const potNow=()=>{const v=Object.values(tot).sort((a,b)=>b-a);return r2(v.reduce((a,b)=>a+b,0)-(v[0]-v[1])+dead);};
   const heads=['Preflop','','',''],parts=[[],[],[],[]];
   for(const e of st.log){
     if(e.k==='board'){heads[e.street]=`${['','Flop','Turn','River'][e.street]} (${A(potNow())}) ${cs(e.cards)}`;continue;}
@@ -722,7 +784,7 @@ function readable(h,cur,unit){
   if(k>1)parts[0]=[`${k} folds`,...pf.slice(k)];
   for(let i=0;i<4;i++)if(heads[i])L.push(`${heads[i]}${parts[i].length?': '+parts[i].join(', '):''}`);
   if(r.live.length>1){L.push('Showdown: '+r.live.map(p=>{const c=r.cardsOf(p);return `${nm(p)} ${c.length===2?'shows '+cs(c)+(r.val[p]?` (${describe(r.val[p])})`:''):'mucks'}`;}).join(', '));}
-  if(st.done!=='herofold')L.push(Object.entries(r.col).map(([p,a])=>`${nm(p)} wins ${A(a)}`).join(', '));
+  if(st.done!=='herofold')L.push(Object.entries(r.col).map(([p,a])=>`${nm(p)} wins ${A(a)}`).join(', ')+(r.rake>0?` (rake ${A(r.rake)})`:''));
   L.push(`Result for Hero: ${signed(r.net,unit==='bb'?Math.abs(bbs(r.net,bb))+'bb':money(Math.abs(r.net),cur))}`);
   return L.join('\n');
 }
@@ -730,7 +792,7 @@ const canLink=()=>/^https?:$/.test(location.protocol);
 function shareBits(){
   const h=DATA.hands[ui.detail],s=DATA.sessions[h.sid];
   const text=readable(h,s.cur,ui.unit);
-  const link=canLink()?location.origin+location.pathname+'#h='+encodeHand(h,s.cur):'';
+  const link=canLink()&&ui.withLink!==false?location.origin+location.pathname+'#h='+encodeHand(h,s.cur):'';
   return {text,link};
 }
 function unitSeg(){return `<div class="seg" role="group" aria-label="Show amounts in"><button class="${ui.unit==='bb'?'on':''}" data-a="unit" data-u="bb">Big blinds</button><button class="${ui.unit==='cash'?'on':''}" data-a="unit" data-u="cash">Cash</button></div>`;}
@@ -738,10 +800,10 @@ function vShare(){
   const h=DATA.hands[ui.detail],{text,link}=shareBits();
   return `<div class="top"><button class="ib" data-a="backDetail" aria-label="Back">←</button><div class="grow"><h2>Share hand #${h.n}</h2><div class="sub">Send it to a friend or coach for review.</div></div></div>
   <div class="grp"><span class="lbl" style="flex:1">Amounts in</span>${unitSeg()}</div>
-  <pre class="hh" id="hhText" style="white-space:pre-wrap">${esc(text)}</pre>
-  ${navigator.share?`<button class="btn primary" data-a="shareNative">Share…</button>`:''}
-  <div class="row"><button class="btn ghost" data-a="copyText">Copy text${link?' + link':''}</button>${link?`<button class="btn ghost" data-a="copyLink">Copy link only</button>`:''}</div>
-  <div class="note">${link?'The link opens a step-by-step replay of this hand in Live Hand Log, and they can save it to their own hands. The hand is stored inside the link itself, so nothing is uploaded.':'Links work when the app is opened from a web address (for example GitHub Pages). Opened as a local file, you can share the text.'}</div>`;
+  ${canLink()?`<div class="grp"><span class="lbl" style="flex:1">Send</span><div class="seg" role="group" aria-label="What to send"><button class="${ui.withLink!==false?'on':''}" data-a="withLink" data-v="1">Text + replay link</button><button class="${ui.withLink===false?'on':''}" data-a="withLink" data-v="0">Text only</button></div></div>`:''}
+  <pre class="hh" id="hhText" style="white-space:pre-wrap">${esc(link?text+'\n\nStep through it: '+link:text)}</pre>
+  <div class="row">${navigator.share?`<button class="btn primary" data-a="shareNative">Share…</button>`:''}<button class="btn ${navigator.share?'ghost':'primary'}" data-a="copyText">Copy</button></div>
+  <div class="note">${link?'The link opens a step-by-step replay of this hand in Live Hand Log, and they can save it to their own hands. The hand is stored inside the link itself, so nothing is uploaded.':canLink()?'Only the text log is sent.':'Links work when the app is opened from a web address (for example GitHub Pages). Opened as a local file, you can share the text.'}</div>`;
 }
 function tablePanel(h,st,m,showAll){
   const bb=h.bb,pot=r2(st.pre.reduce((a,p)=>a+st.P[p].tot,0));
@@ -801,7 +863,7 @@ function startHand(){
   const hero=s.heroStack>0?s.heroStack:s.stack;
   ui.hand={id:'h'+uid36(),sid:s.id,n:hs.length+1,at:Date.now(),players:s.players,sb:s.sb,bb:s.bb,cur:s.cur,
     heroStack:hero,vStack:Math.max(s.stack,1),pos:null,events:[],heroCards:[],shown:{},winners:[],stage:'pos',
-    straddle:straddleInfo(s.lastStraddle,s.players)?normSd(s.lastStraddle):null,stacks:{},
+    straddle:straddleInfo(s.lastStraddle,s.players)?normSd(s.lastStraddle):null,stacks:{},ante:normAnte(s.ante),rake:normRake(s.rake),
     suggest:last&&last.players===s.players?nextPos(last.pos,s.players):null};
   ui.pad=null;ui.stackPad=null;ui.pick=null;ui.amt='';saveDraft();go('hand');
 }
@@ -821,7 +883,7 @@ function saveHand(){
   const h=ui.hand,s=S(),r=resolve(h);
   const out={id:h.id,sid:h.sid,n:h.n,at:h.at,players:h.players,sb:h.sb,bb:h.bb,heroStack:h.heroStack,vStack:h.vStack,pos:h.pos,
     events:h.events,heroCards:h.heroCards,shown:h.shown,winners:h.winners,net:r.net,summary:summarize(h,r),
-    straddle:straddleInfo(h.straddle,h.players)?normSd(h.straddle):null,stacks:h.stacks||{}};
+    straddle:straddleInfo(h.straddle,h.players)?normSd(h.straddle):null,stacks:h.stacks||{},ante:normAnte(h.ante),rake:normRake(h.rake)};
   putHand(out);
   s.heroStack=r2(h.heroStack+r.net);putSession(s);
   ui.hand=null;saveDraft();
@@ -844,8 +906,9 @@ function act(a,d){
   if(a!=='discard'&&a!=='delHand'&&a!=='delSession')ui.confirm=null;
   switch(a){
     case 'home':return go('home');
-    case 'setup':ui.setupPlayers=9;return go('setup');
-    case 'setPlayers':{ui.setupPlayers=+d.n;const keep={};['sName','sSb','sBb','sCur','sHero','sStack','sName2'].forEach(k=>keep[k]=document.getElementById(k).value);render();Object.entries(keep).forEach(([k,v])=>document.getElementById(k).value=v);return;}
+    case 'setup':ui.setupPlayers=9;go('setup');syncSetup();return;
+    case 'setPlayers':{ui.setupPlayers=+d.n;const keep=[...document.querySelectorAll('#setupForm input,#setupForm select')].map(el=>[el.id,el.type==='checkbox'?el.checked:el.value]);
+      render();for(const [id,v] of keep){const el=document.getElementById(id);if(!el)continue;if(el.type==='checkbox')el.checked=v;else if(el.tagName!=='SELECT'||[...el.options].some(o=>o.value===v))el.value=v;}syncSetup();return;}
     case 'open':ui.sid=d.id;return go('session');
     case 'back':return go(ui.back==='home'?'home':'session');
     case 'players':{const s=S();s.players=Math.min(10,Math.max(2,s.players+ +d.d));putSession(s);return render();}
@@ -884,7 +947,9 @@ function act(a,d){
       ui.amt=s;return render();
     }
     case 'padCancel':ui.pad=null;ui.amt='';return render();
-    case 'padOk':{const st=replay(h),v=r2(parseFloat(ui.amt)||0);if(!(v>0))return;if(ui.pad.a==='r'&&v<=st.curBet)return;pushEvent({p:ui.pad.p,a:ui.pad.a,to:v});return render();}
+    case 'padOk':{const st=replay(h),v=r2(parseFloat(ui.amt)||0),{min,max}=limits(st,ui.pad.p,h.bb);
+      if(!(v>0)||!(v===max||(v>=min&&v<max)))return;
+      pushEvent(v===max?{p:ui.pad.p,a:ui.pad.a,allin:true}:{p:ui.pad.p,a:ui.pad.a,to:v});return render();}
     case 'allin':pushEvent({p:ui.pad.p,a:ui.pad.a,allin:true});return render();
     case 'jump':{
       for(let g=0;g<20;g++){const st=replay(h);if(!st.toAct||st.toAct===d.p||st.done)break;const o=options(st,st.toAct);h.events.push({p:st.toAct,a:o.toCall>0?'f':'x'});}
@@ -919,7 +984,7 @@ function act(a,d){
     case 'unit':ui.unit=d.u;try{localStorage.setItem('hand-log.unit',d.u);}catch(e){}return render();
     case 'shareNative':{const {text,link}=shareBits();navigator.share({title:'Poker hand for review',text:link?text+'\n\nStep through it: '+link:text}).catch(()=>{});return;}
     case 'copyText':{const {text,link}=shareBits();return copy(link?text+'\n\nStep through it: '+link:text);}
-    case 'copyLink':return copy(shareBits().link);
+    case 'withLink':ui.withLink=d.v==='1';try{localStorage.setItem('hand-log.withLink',d.v);}catch(e){}return render();
     case 'step':{const n=ui.shared.h.events.length;ui.step=Math.max(0,Math.min(n,d.s==='first'?0:d.s==='last'?n:ui.step+ +d.s));return render();}
     case 'saveShared':return saveShared();
     case 'closeShared':ui.shared=null;try{history.replaceState(null,'',location.pathname+location.search);}catch(e){}return go('home');
@@ -930,14 +995,29 @@ function act(a,d){
 document.addEventListener('click',e=>{const b=e.target.closest('[data-a]');if(!b||b.disabled)return;e.preventDefault();act(b.dataset.a,b.dataset);});
 document.addEventListener('submit',e=>{
   if(e.target.id!=='setupForm')return;e.preventDefault();
-  const g=id=>document.getElementById(id).value.trim(),num=id=>parseFloat(g(id));
-  const sb=num('sSb'),bb=num('sBb'),hero=num('sHero'),stack=num('sStack');
-  const err=document.getElementById('setupErr');
-  if(!(sb>0)||!(bb>0)||bb<sb){err.hidden=false;err.textContent='Enter blinds as numbers, with the big blind at least the small blind (for example 1 and 2).';return;}
-  if(!(hero>0)||!(stack>0)){err.hidden=false;err.textContent='Enter your buy-in and a typical stack as amounts of money, for example 200.';return;}
-  const s={id:'s'+uid36(),name:g('sName')||'Live game',sb:r2(sb),bb:r2(bb),cur:g('sCur'),players:ui.setupPlayers,heroStack:r2(hero),stack:r2(stack),heroName:(g('sName2')||'Hero').replace(/[:\[\]]/g,''),createdAt:Date.now()};
+  const g=id=>{const el=document.getElementById(id);return el?el.value.trim():'';},num=id=>parseFloat(g(id));
+  const err=document.getElementById('setupErr'),fail=t=>{err.hidden=false;err.textContent=t;err.scrollIntoView({block:'center'});};
+  const sb=num('sSb'),bb=num('sBb'),hero=num('sHero');let stack=num('sStack');
+  if(!(sb>0)||!(bb>0))return fail('Enter the small blind and big blind, for example 1 and 2.');
+  if(bb<sb)return fail('The big blind must be at least the small blind.');
+  if(!(hero>0))return fail('Enter your buy-in, for example 200.');
+  if(g('sStack')&&!(stack>0))return fail('Enter the typical villain stack as an amount, or leave it blank to use your buy-in.');
+  if(!(stack>0))stack=hero;
+  let ante=null;const at=g('sAnteType');
+  if(at){ante=normAnte({type:at,amt:num('sAnteAmt')});if(!ante)return fail('Enter the ante amount.');}
+  let straddle=null;const stt=g('sStrType');
+  if(stt){const k=STR[stt].btn?1:STR[stt].k,def=strDefaults(stt,bb);const amts=[];
+    for(let i=0;i<k;i++){const raw=g('sStr'+i);const v=raw?parseFloat(raw):def[i];if(!(v>0))return fail('Enter each straddle as an amount, or leave it blank for the usual size.');amts.push(r2(v));}
+    straddle=normSd({type:stt,amts});}
+  let rake=null;const rt=g('sRakeType');
+  if(rt==='pct'){rake=normRake({type:'pct',pct:num('sRakePct'),cap:g('sRakeCap')?num('sRakeCap'):0,nfnd:document.getElementById('sNfnd').checked});if(!rake)return fail('Enter the rake percentage, for example 5.');}
+  if(rt==='fixed'){rake=normRake({type:'fixed',fixed:num('sRakeFixed'),nfnd:document.getElementById('sNfnd').checked});if(!rake)return fail('Enter the rake taken per hand.');}
+  const s={id:'s'+uid36(),name:g('sName')||'Live '+new Date().toLocaleDateString(undefined,{month:'short',day:'numeric'}),sb:r2(sb),bb:r2(bb),cur:g('sCur'),players:ui.setupPlayers,
+    heroStack:r2(hero),stack:r2(stack),heroName:(g('sName2')||'Hero').replace(/[:\[\]<>]/g,'')||'Hero',createdAt:Date.now(),ante,rake,lastStraddle:straddle};
   putSession(s);ui.sid=s.id;askPersist();startHand();
 });
+document.addEventListener('change',e=>{if(['sAnteType','sStrType','sRakeType'].includes(e.target.id))syncSetup();});
+document.addEventListener('input',e=>{if(e.target.closest&&e.target.closest('#setupForm')){const er=document.getElementById('setupErr');if(er)er.hidden=true;}});
 document.addEventListener('input',e=>{
   const h=ui.hand;if(!h||ui.view!=='hand')return;
   if(e.target.id==='heroStackIn'){const v=r2(parseFloat(e.target.value));const lab=document.getElementById('heroStackBb');
@@ -971,7 +1051,7 @@ document.addEventListener('keydown',e=>{
 });
 
 /* ---------------- boot ---------------- */
-try{ui.unit=localStorage.getItem('hand-log.unit')||'bb';}catch(e){ui.unit='bb';}
+try{ui.unit=localStorage.getItem('hand-log.unit')||'bb';ui.withLink=localStorage.getItem('hand-log.withLink')!=='0';}catch(e){ui.unit='bb';ui.withLink=true;}
 loadLocal();
 // Recalculate stored results so hands saved by older versions (e.g. the uneven-chop bug) show correct numbers.
 (function fixResults(){let changed=false;for(const h of Object.values(DATA.hands)){try{if(h.deleted)continue;const r=resolve(h);if(r.net!==h.net){h.net=r.net;changed=true;}}catch(e){}}
@@ -996,7 +1076,7 @@ document.addEventListener('change',async e=>{
         players:Math.min(10,Math.max(2,Math.round(+v.players)||9)),heroStack:num(v.heroStack,200),stack:num(v.stack,200),
         heroName:String(v.heroName||'Hero').replace(/[:\[\]<>]/g,'').slice(0,30)||'Hero',createdAt:num(v.createdAt,Date.now()),
         updatedAt:num(v.updatedAt,0),deleted:!!v.deleted,shared:!!v.shared,
-        lastStraddle:normSd(v.lastStraddle)};}
+        lastStraddle:normSd(v.lastStraddle),ante:normAnte(v.ante),rake:normRake(v.rake)};}
     for(const v of Object.values(d.hands||{})){
       try{if(!v||!okId(v.id)||!okId(v.sid))continue;
         const players=Math.min(10,Math.max(2,Math.round(+v.players)||9)),pre=positions(players).pre;
@@ -1009,7 +1089,7 @@ document.addEventListener('change',async e=>{
         const h={id:v.id,sid:v.sid,n:Math.max(1,Math.round(+v.n)||1),at:num(v.at,Date.now()),players,sb:num(v.sb,1),bb:num(v.bb,2),
           heroStack:num(v.heroStack,200),vStack:num(v.vStack,200),pos:v.pos,events,heroCards:cards(v.heroCards),shown,
           winners:(v.winners||[]).filter(p=>pre.includes(p)),updatedAt:num(v.updatedAt,0),deleted:!!v.deleted,
-          straddle:straddleInfo(v.straddle,players)?normSd(v.straddle):null,stacks:cleanStacks(v.stacks,pre)};
+          straddle:straddleInfo(v.straddle,players)?normSd(v.straddle):null,stacks:cleanStacks(v.stacks,pre),ante:normAnte(v.ante),rake:normRake(v.rake)};
         const r=resolve(h);h.net=r.net;h.summary=summarize(h,r);hands[h.id]=h;
       }catch(err){}
     }
