@@ -468,8 +468,8 @@ function vSession(){
   ${syncHTML()}
   <div class="lbl">Hands</div>
   ${hs.length?`<div class="list">${hs.map(h=>`<button class="li" data-a="detail" data-id="${h.id}">
-      <span class="posbadge">${h.pos}</span>
-      <div class="grow"><div class="t">#${h.n} ${h.heroCards&&h.heroCards.length?cardsHTML(h.heroCards,true):''}</div><div class="s">${h.summary||''}</div></div>
+      <span class="posbadge">${esc(h.pos)}</span>
+      <div class="grow"><div class="t">#${h.n} ${h.heroCards&&h.heroCards.length?cardsHTML(h.heroCards,true):''}</div><div class="s">${esc(h.summary||'')}</div></div>
       <div class="res num ${h.net>0?'pos':h.net<0?'neg':''}">${signed(h.net,Math.abs(bbs(h.net,h.bb))+' bb')}<div class="s">${signed(h.net,money(Math.abs(h.net),s.cur))}</div></div></button>`).join('')}</div>`
   :`<div class="list"><div class="empty">No hands yet. Tap <b>New hand</b> when the cards are dealt.</div></div>`}
   ${ui.confirm==='delSession'?`<button class="btn ghost" style="color:var(--loss)" data-a="delSession">Tap again to delete this session</button>`:`<button class="btn ghost muted" data-a="delSession">Delete session</button>`}`;
@@ -866,6 +866,31 @@ document.addEventListener('change',async e=>{
     const j=JSON.parse(await e.target.files[0].text());const d=j&&j.data;
     if(!d||typeof d.sessions!=='object'||typeof d.hands!=='object')throw 0;
     let n=0;
+    // A backup file may come from someone else: keep only well-formed records and clean every field.
+    const num=(x,dflt)=>{x=+x;return isFinite(x)&&x>=0?r2(x):dflt;};
+    const okId=x=>typeof x==='string'&&/^[a-z0-9]{1,40}$/i.test(x);
+    const sess={},hands={};
+    for(const v of Object.values(d.sessions||{})){if(!v||!okId(v.id))continue;
+      sess[v.id]={id:v.id,name:String(v.name||'Live game').slice(0,80),sb:num(v.sb,1),bb:num(v.bb,2),cur:CUR[v.cur]?v.cur:'USD',
+        players:Math.min(10,Math.max(2,Math.round(+v.players)||9)),heroStack:num(v.heroStack,200),stack:num(v.stack,200),
+        heroName:String(v.heroName||'Hero').replace(/[:\[\]<>]/g,'').slice(0,30)||'Hero',createdAt:num(v.createdAt,Date.now()),
+        updatedAt:num(v.updatedAt,0),deleted:!!v.deleted,shared:!!v.shared};}
+    for(const v of Object.values(d.hands||{})){
+      try{if(!v||!okId(v.id)||!okId(v.sid))continue;
+        const players=Math.min(10,Math.max(2,Math.round(+v.players)||9)),pre=positions(players).pre;
+        if(!pre.includes(v.pos))continue;
+        const cards=a=>Array.isArray(a)?a.filter(c=>/^[2-9TJQKA][shdc]$/.test(c)).slice(0,2):[];
+        const events=(v.events||[]).map(e=>e&&e.t==='board'?{t:'board',cards:(e.cards||[]).filter(c=>/^[2-9TJQKA][shdc]$/.test(c))}
+          :{p:pre.includes(e.p)?e.p:null,a:'fxcbr'.includes(e.a)&&e.a.length===1?e.a:null,...(e.allin?{allin:true}:{}),...(e.to!=null?{to:num(e.to,0)}:{})});
+        if(events.some(e=>e.t!=='board'&&(!e.p||!e.a)))continue;
+        const shown={};for(const [k,c] of Object.entries(v.shown||{}))if(pre.includes(k))shown[k]=cards(c);
+        const h={id:v.id,sid:v.sid,n:Math.max(1,Math.round(+v.n)||1),at:num(v.at,Date.now()),players,sb:num(v.sb,1),bb:num(v.bb,2),
+          heroStack:num(v.heroStack,200),vStack:num(v.vStack,200),pos:v.pos,events,heroCards:cards(v.heroCards),shown,
+          winners:(v.winners||[]).filter(p=>pre.includes(p)),updatedAt:num(v.updatedAt,0),deleted:!!v.deleted};
+        const r=resolve(h);h.net=r.net;h.summary=summarize(h,r);hands[h.id]=h;
+      }catch(err){}
+    }
+    d.sessions=sess;d.hands=hands;
     for(const [k,v] of Object.entries(d.sessions)){const l=DATA.sessions[k];if(!l||(v.updatedAt||0)>(l.updatedAt||0))DATA.sessions[k]=v;}
     for(const [k,v] of Object.entries(d.hands)){const l=DATA.hands[k];if(!l||(v.updatedAt||0)>(l.updatedAt||0)){DATA.hands[k]=v;n++;}}
     saveLocal();toast(`Restored ${n} hand${n===1?'':'s'}`);go('home');
